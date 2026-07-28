@@ -1,0 +1,61 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+coverage/
+.vite/
+.turbo/
+.cache/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Local databases and storage
+*.db
+*.sqlite
+*.sqlite3
+data/
+storage/
+uploads/
+minio/
+postgres-data/
+redis-data/
+
+# Media processing scratch
+tmp/
+temp/
+downloads/
+transcodes/
+thumbnails/
+
+# Test artifacts
+test-results/
+playwright-report/
+blob-report/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OpenCode/session-local artifacts
+.opencode/tmp/
+.opencode/cache/
