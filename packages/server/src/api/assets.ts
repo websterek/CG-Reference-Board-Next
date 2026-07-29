@@ -14,7 +14,7 @@ import { Readable, PassThrough } from 'node:stream';
 import { randomUUID, createHash } from 'node:crypto';
 import { eq, and, isNull } from 'drizzle-orm';
 import { assets } from '../db/schema';
-import { getDb } from '../db';
+import { getDb } from '../db/client';
 import { getStorage } from '../storage';
 
 const ALLOWED_MIME = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
@@ -127,12 +127,16 @@ export async function registerAssetRoutes(app: FastifyInstance): Promise<void> {
 
   /**
    * GET /api/assets/:key — server-mediated asset proxy (D7).
+   *
+   * `:key` is a wildcard path (slashes included) because storage keys are
+   * `boards/<boardId>/assets/<assetId>`.
    */
-  app.get(
-    '/api/assets/:key',
+  app.get<{ Params: { '*': string } }>(
+    '/api/assets/*',
     { preHandler: app.requireAuth },
     async (request, reply) => {
-      const { key } = request.params as { key: string };
+      const params = request.params as Record<string, string>;
+      const key = params['*'] ?? '';
       const match = key.match(/^boards\/([^/]+)\/assets\/([^/]+)$/);
       if (!match) {
         return reply.code(400).send({ error: 'invalid_key' });

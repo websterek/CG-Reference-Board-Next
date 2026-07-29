@@ -7,7 +7,7 @@ Docker Compose configuration with PostgreSQL, MinIO, and the app server. Persist
 ---
 
 <!-- Promoted from openspec/changes/first-milestone-vertical-slice/specs/deployment/spec.md -->
-
+## Requirements
 ### Requirement: Docker Compose configuration
 The system SHALL provide a Docker Compose configuration that starts all services with a single command.
 
@@ -65,18 +65,27 @@ The system SHALL define health checks for all services in Docker Compose.
 - **THEN** the /health endpoint returns HTTP 200 when the server is ready
 
 ### Requirement: Development workflow
-The system SHALL support development without Docker for faster iteration.
+The system SHALL support development without Docker for faster iteration. The dev loop runs entirely on the host with SQLite + LocalStorage; no background services required.
 
 #### Scenario: pnpm dev starts all packages
 - **WHEN** user runs "pnpm dev" from the project root
-- **THEN** the domain package watches for changes
-- **THEN** the server starts on port 3000 with hot reload
+- **THEN** the server starts on port 3000 with hot reload (tsx watch)
+- **THEN** the server uses a SQLite database at `./local.db` (no Postgres needed)
 - **THEN** the client starts on port 5173 with Vite dev server and HMR
+- **THEN** no Docker daemon is required
 
-#### Scenario: Development without MinIO
+#### Scenario: Development without MinIO and without Postgres
 - **WHEN** running in development mode without Docker
+- **THEN** the server uses a SQLite-backed Drizzle dialect
 - **THEN** the server uses a local filesystem StorageProvider instead of MinIO
-- **THEN** uploaded images are stored in a local ./uploads directory
+- **THEN** uploaded images are stored in a local `./uploads` directory
+- **THEN** the Yjs Hocuspocus extension round-trips through SQLite
+
+#### Scenario: Switching to Postgres for staging
+- **WHEN** the developer wants Postgres parity without Docker
+- **THEN** they run `docker compose -f docker-compose.dev.yml up -d` to start a real Postgres
+- **THEN** setting `DATABASE_URL=postgres://gridboard:gridboard@localhost:5432/gridboard` switches the driver
+- **THEN** migrations apply cleanly to the Postgres database
 
 ### Requirement: Environment configuration
 The system SHALL use environment variables for all configurable settings.
@@ -100,3 +109,4 @@ The system SHALL include a .dockerignore file to exclude unnecessary files from 
 - **THEN** node_modules directories are excluded
 - **THEN** build output directories are excluded
 - **THEN** git history and local configuration files are excluded
+

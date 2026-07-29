@@ -19,6 +19,6 @@ The system SHALL support development without Docker for faster iteration. The de
 
 #### Scenario: Switching to Postgres for staging
 - **WHEN** the developer wants Postgres parity without Docker
-- **THEN** an in-process Postgres (pglite) is available as an opt-in
-- **THEN** setting `DATABASE_URL=pglite://./local-pg.db` switches the driver
-- **THEN** migrations apply cleanly to the pglite database
+- **THEN** they run `docker compose -f docker-compose.dev.yml up -d` to start a real Postgres
+- **THEN** setting `DATABASE_URL=postgres://gridboard:gridboard@localhost:5432/gridboard` switches the driver
+- **THEN** migrations apply cleanly to the Postgres database

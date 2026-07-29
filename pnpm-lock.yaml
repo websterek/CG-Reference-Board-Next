@@ -151,9 +151,12 @@ importers:
       '@hocuspocus/server':
         specifier: ^2.15.3
         version: 2.15.3(y-protocols@1.0.7(yjs@13.6.31))(yjs@13.6.31)
+      better-sqlite3:
+        specifier: ^13.0.2
+        version: 13.0.2
       drizzle-orm:
         specifier: ^0.38.4
-        version: 0.38.4(@types/pg@8.20.0)(@types/react@18.3.31)(pg@8.22.0)(react@18.3.1)
+        version: 0.38.4(@types/better-sqlite3@7.6.13)(@types/pg@8.20.0)(@types/react@18.3.31)(better-sqlite3@13.0.2)(pg@8.22.0)(react@18.3.1)
       fastify:
         specifier: ^5.10.0
         version: 5.10.0
@@ -173,6 +176,9 @@ importers:
         specifier: ^3.25.76
         version: 3.25.76
     devDependencies:
+      '@types/better-sqlite3':
+        specifier: ^7.6.13
+        version: 7.6.13
       '@types/pg':
         specifier: ^8.20.0
         version: 8.20.0
@@ -1324,6 +1330,9 @@ packages:
   '@types/babel__traverse@7.28.0':
     resolution: {integrity: sha512-8PvcXf70gTDZBgt9ptxJ8elBeBjcLOAcOtoO/mPJjtji1+CdGbHgm77om1GrsPxsiE+uXIpNSK64UYaIwQXd4Q==}
 
+  '@types/better-sqlite3@7.6.13':
+    resolution: {integrity: sha512-NMv9ASNARoKksWtsq/SHakpYAYnhBrQgGD8zkLYk/jaK8jUGn08CfEdTRgYhMypUQAfzSP8W6gNLe0q19/t4VA==}
+
   '@types/earcut@3.0.0':
     resolution: {integrity: sha512-k/9fOUGO39yd2sCjrbAJvGDEQvRwRnQIZlBz43roGwUZo5SHAmyVvSFyaVVZkicRVCaDXPKlbxrUcBuJoSWunQ==}
 
@@ -1571,6 +1580,10 @@ packages:
     resolution: {integrity: sha512-69D/imtToCsIcAl8WBS2YaRwA4jO/j0HhU+hELqMEu9f54MoUtI6+XH5mrKU8rEFNEk/Ui1I2MK4/JkWacclGw==}
     engines: {node: '>=6.0.0'}
     hasBin: true
+
+  better-sqlite3@13.0.2:
+    resolution: {integrity: sha512-jW6oufeDhXZaiX9Lw5A+oerVClx4iFrI6uDj1zu7SqUAjak9vbJvA0NEcKLNxHiQHb6kYCoFzzXYV0YOauhV3g==}
+    engines: {node: '>=22'}
 
   bidi-js@1.0.3:
     resolution: {integrity: sha512-RKshQI1R3YQ+n9YJz2QQ147P66ELpa1FQEg20Dk8oW9t2KgLbpDLLp9aGZ7y8WHSshDknG0bknqGw5/tyCs5tw==}
@@ -2495,6 +2508,10 @@ packages:
 
   natural-compare@1.4.0:
     resolution: {integrity: sha512-OWND8ei3VtNC9h7V60qff3SVobHr996CTwgxubgyQYEpg290h9J0buyECNNJexkFm5sOajh5G116RYA1c8ZMSw==}
+
+  node-addon-api@8.9.0:
+    resolution: {integrity: sha512-ekZMeaaIzSQTSpr7X2X3iJM7lTzgnx8ahAG9pJfT/7+14mlEM8ZYQ9cgCDvSSRbReFK0oHli3WrZdCiRsgAT9Q==}
+    engines: {node: ^18 || ^20 || >= 21}
 
   node-exports-info@1.6.2:
     resolution: {integrity: sha512-kXs9Go0cah0qHVV2v389IXQLdLCeE1xfFtjOAF+iobu0OIoG1pje8At2vMHyaPMiPMnG/LWP50twML21eMcAag==}
@@ -4259,6 +4276,10 @@ snapshots:
     dependencies:
       '@babel/types': 7.29.7
 
+  '@types/better-sqlite3@7.6.13':
+    dependencies:
+      '@types/node': 22.20.1
+
   '@types/earcut@3.0.0': {}
 
   '@types/estree@1.0.9': {}
@@ -4565,6 +4586,10 @@ snapshots:
 
   baseline-browser-mapping@2.11.6: {}
 
+  better-sqlite3@13.0.2:
+    dependencies:
+      node-addon-api: 8.9.0
+
   bidi-js@1.0.3:
     dependencies:
       require-from-string: 2.0.2
@@ -4741,10 +4766,12 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  drizzle-orm@0.38.4(@types/pg@8.20.0)(@types/react@18.3.31)(pg@8.22.0)(react@18.3.1):
+  drizzle-orm@0.38.4(@types/better-sqlite3@7.6.13)(@types/pg@8.20.0)(@types/react@18.3.31)(better-sqlite3@13.0.2)(pg@8.22.0)(react@18.3.1):
     optionalDependencies:
+      '@types/better-sqlite3': 7.6.13
       '@types/pg': 8.20.0
       '@types/react': 18.3.31
+      better-sqlite3: 13.0.2
       pg: 8.22.0
       react: 18.3.1
 
@@ -5644,6 +5671,8 @@ snapshots:
   nanoid@3.3.16: {}
 
   natural-compare@1.4.0: {}
+
+  node-addon-api@8.9.0: {}
 
   node-exports-info@1.6.2:
     dependencies:

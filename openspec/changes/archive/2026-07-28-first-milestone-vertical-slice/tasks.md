@@ -179,3 +179,13 @@
 - [ ] 12.17 Run docker compose up --build and verify full stack  *(requires Docker — deferred to environment)*
 - [ ] 12.18 Stop and restart containers, verify data persistence (Postgres + MinIO volumes)
 - [ ] 12.19 Run `pnpm dev` without Docker and verify per-package hot reload works
+
+---
+
+> **Follow-up:** The 14 deferred tasks above are tracked under the active
+> change `openspec/changes/local-dev-and-dockerize/`. That change adds a
+> SQLite-backed dev path so task 12.19 (and the others that don't require a
+> real browser) can run without Docker, and adds Vitest + Playwright tests
+> that exercise tasks 12.11–12.18. The archive above is preserved as the
+> historical record of what shipped at first-milestone archive time; do not
+> flip any task here.

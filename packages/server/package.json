@@ -9,9 +9,13 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "test": "vitest run",
+    "test:compose": "vitest run compose-boot",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate": "drizzle-kit migrate",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:generate:sqlite": "OPSX_DIALECT=sqlite drizzle-kit generate",
+    "migrate:sqlite": "OPSX_DIALECT=sqlite drizzle-kit migrate",
+    "db:reset": "node -e \"import('node:fs').then(fs=>{fs.rmSync('./local.db',{force:true});fs.rmSync('./local.db-shm',{force:true});fs.rmSync('./local.db-wal',{force:true})})\" && DATABASE_URL=sqlite:./local.db OPSX_DIALECT=sqlite drizzle-kit migrate"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1097.0",
@@ -24,6 +28,7 @@
     "@gridboard/domain": "workspace:*",
     "@hocuspocus/extension-database": "^2.15.3",
     "@hocuspocus/server": "^2.15.3",
+    "better-sqlite3": "^13.0.2",
     "drizzle-orm": "^0.38.4",
     "fastify": "^5.10.0",
     "fastify-plugin": "^6.0.0",
@@ -33,6 +38,7 @@
     "zod": "^3.25.76"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/pg": "^8.20.0",
     "@types/ws": "^8.18.1",
     "drizzle-kit": "^0.30.6",

@@ -78,7 +78,7 @@ Deliver one reliable vertical slice: a custom grid canvas with basic selectable 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **GridBoard** (11 symbols, 9 relationships, 0 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **CG-Reference-Board-Next** (979 symbols, 1585 relationships, 24 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
@@ -101,10 +101,10 @@ This project is indexed by GitNexus as **GridBoard** (11 symbols, 9 relationship
 
 | Resource | Use for |
 |----------|---------|
-| `gitnexus://repo/GridBoard/context` | Codebase overview, check index freshness |
-| `gitnexus://repo/GridBoard/clusters` | All functional areas |
-| `gitnexus://repo/GridBoard/processes` | All execution flows |
-| `gitnexus://repo/GridBoard/process/{name}` | Step-by-step execution trace |
+| `gitnexus://repo/CG-Reference-Board-Next/context` | Codebase overview, check index freshness |
+| `gitnexus://repo/CG-Reference-Board-Next/clusters` | All functional areas |
+| `gitnexus://repo/CG-Reference-Board-Next/processes` | All execution flows |
+| `gitnexus://repo/CG-Reference-Board-Next/process/{name}` | Step-by-step execution trace |
 
 ## CLI
 

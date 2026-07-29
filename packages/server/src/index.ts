@@ -23,6 +23,7 @@ import { registerBoardRoutes } from './api/boards';
 import { registerAssetRoutes } from './api/assets';
 import { initStorage } from './storage';
 import { mountCollab } from './collab/hocuspocus';
+import { getDriverName } from './db/driver';
 import type { AppConfig } from './config/env';
 
 export async function buildApp(config?: AppConfig): Promise<Awaited<ReturnType<typeof Fastify>>> {
@@ -31,7 +32,6 @@ export async function buildApp(config?: AppConfig): Promise<Awaited<ReturnType<t
     logger: { level: cfg.NODE_ENV === 'test' ? 'warn' : 'info' },
   });
 
-  // Expose cfg to routes via decorate
   app.decorate('config', cfg);
 
   await app.register(cors, { origin: cfg.CORS_ORIGIN, credentials: true });
@@ -39,8 +39,6 @@ export async function buildApp(config?: AppConfig): Promise<Awaited<ReturnType<t
     limits: { fileSize: cfg.ASSET_MAX_BYTES },
   });
   await app.register(websocket, {
-    // The server owns the only listener on PORT; mountCollab wires the
-    // Hocuspocus handleConnection below.
     options: { maxPayload: 1048576 },
   });
   await app.register(jwtPlugin, { config: cfg });
@@ -66,6 +64,8 @@ export async function main(): Promise<void> {
   await app.listen({ port: cfg.PORT, host: cfg.HOST });
   // eslint-disable-next-line no-console
   console.log(`[gridboard-server] listening on http://${cfg.HOST}:${cfg.PORT}`);
+  // eslint-disable-next-line no-console
+  console.log(`[gridboard-server] db driver: ${getDriverName()}`);
 }
 
 // Run when invoked directly (tsx watch / prod start).
@@ -77,7 +77,6 @@ if (isEntry) {
   });
 }
 
-// Augment FastifyInstance to know about our `config` decorator.
 declare module 'fastify' {
   interface FastifyInstance {
     config: AppConfig;

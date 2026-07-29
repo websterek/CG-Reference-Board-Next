@@ -11,11 +11,13 @@
     "dev": "pnpm -r --parallel --filter @gridboard/domain --filter @gridboard/server --filter @gridboard/client dev",
     "build": "pnpm -r build",
     "test": "pnpm -r test",
+    "test:compose": "pnpm --filter @gridboard/server test:compose",
     "lint": "eslint .",
     "typecheck": "pnpm -r typecheck",
     "clean": "pnpm -r exec rm -rf dist && rm -rf node_modules",
     "e2e": "playwright test",
-    "e2e:headed": "playwright test --headed"
+    "e2e:headed": "playwright test --headed",
+    "db:reset": "pnpm --filter @gridboard/server db:reset"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.0",

@@ -41,5 +41,6 @@ export default defineConfig({
       use: { ...devices['Desktop Firefox'] },
     },
   ],
-  // webServer left out — compose-based orchestration manages server/client.
+  globalSetup: './e2e/global-setup.ts',
+  globalTeardown: './e2e/global-teardown.ts',
 });

@@ -1,108 +1,48 @@
 /**
- * Drizzle schema for GridBoard server.
+ * Schema barrel — picks the active dialect's table definitions based on
+ * `DATABASE_URL` at module-load time.
  *
- * Tables:
- *   - boards:        board metadata (one row per board)
- *   - yjs_documents: binary Yjs document per board (BYTEA)
- *   - assets:        uploaded images/files (per-board)
- *   - board_members: durable grants (boardId, role) — even with no user
- *                    system, one owner row per board is inserted on creation
- *                    (design.md D9, task 3.5).
+ * The driver resolution is eager: at module-load, we read
+ * `process.env.DATABASE_URL` and pick the matching per-dialect tables. If
+ * the env is unset, `db/driver.ts` defaults to SQLite (`sqlite:./local.db`),
+ * so importing this module never throws just because `DATABASE_URL` is
+ * missing.
  *
- * The schema is the server-side truth for these tables; the Yjs document
- * binary is the source-of-truth for live board content.
+ * The two per-dialect files (`schema.pg.ts`, `schema.sqlite.ts`) export
+ * tables with identical names and structurally identical column shapes.
+ *
+ * Type strategy:
+ *   - Tables are typed as the PG dialect (the production truth).
+ *   - The SQLite runtime values are cast to the PG typed surface.
+ *   - Row types come from the PG schema's `$inferSelect`.
  */
 
-import {
-  pgTable,
-  text,
-  timestamp,
-  pgEnum,
-  customType,
-  integer,
-  bigint,
-  primaryKey,
-  uniqueIndex,
-} from 'drizzle-orm/pg-core';
-import { sql } from 'drizzle-orm';
+import { getDriverName } from './driver';
 
-// Drizzle has no built-in BYTEA in the pg-core bundle; declare it explicitly.
-const bytea = customType<{ data: Buffer; default: false }>({
-  dataType() {
-    return 'bytea';
-  },
-});
+import * as pgSchema from './schema.pg.js';
+import * as sqliteSchema from './schema.sqlite.js';
 
-export const memberRole = pgEnum('member_role', ['owner', 'editor', 'viewer']);
+type PgSchema = typeof pgSchema;
 
-export const boards = pgTable('boards', {
-  id: text('id').primaryKey(),
-  name: text('name').notNull(),
-  createdAt: timestamp('created_at', { withTimezone: true })
-    .notNull()
-    .default(sql`now()`),
-  updatedAt: timestamp('updated_at', { withTimezone: true })
-    .notNull()
-    .default(sql`now()`),
-});
+const driver = getDriverName();
+const active = (
+  driver === 'sqlite' ? sqliteSchema : pgSchema
+) as unknown as PgSchema;
 
-export const yjsDocuments = pgTable('yjs_documents', {
-  // Document name (matches board:{boardId} convention from collab-schema.ts).
-  name: text('name').primaryKey(),
-  boardId: text('board_id')
-    .notNull()
-    .references(() => boards.id, { onDelete: 'cascade' }),
-  data: bytea('data').notNull().default(sql`\\x`),
-  version: integer('version').notNull().default(0),
-  updatedAt: timestamp('updated_at', { withTimezone: true })
-    .notNull()
-    .default(sql`now()`),
-});
+export const boards = active.boards;
+export const yjsDocuments = active.yjsDocuments;
+export const assets = active.assets;
+export const boardMembers = active.boardMembers;
 
-export const assets = pgTable(
-  'assets',
-  {
-    id: text('id').primaryKey(),
-    boardId: text('board_id')
-      .notNull()
-      .references(() => boards.id, { onDelete: 'cascade' }),
-    filename: text('filename').notNull(),
-    mimeType: text('mime_type').notNull(),
-    /** Discriminator: rectangle | image | ... for client/server wiring. */
-    kind: text('kind').notNull().default('image'),
-    size: bigint('size', { mode: 'number' }).notNull(),
-    storageKey: text('storage_key').notNull(),
-    checksum: text('checksum').notNull(),
-    /** Future-proof: nullable until user accounts land (design.md D9). */
-    uploadedBy: text('uploaded_by'),
-    deletedAt: timestamp('deleted_at', { withTimezone: true }),
-    createdAt: timestamp('created_at', { withTimezone: true })
-      .notNull()
-      .default(sql`now()`),
-  },
-  (t) => ({
-    uniqKey: uniqueIndex('assets_storage_key_uniq').on(t.storageKey),
-  }),
-);
+export const memberRole: unknown =
+  (active as unknown as { memberRole?: unknown }).memberRole ?? null;
 
-export const boardMembers = pgTable(
-  'board_members',
-  {
-    boardId: text('board_id')
-      .notNull()
-      .references(() => boards.id, { onDelete: 'cascade' }),
-    role: memberRole('role').notNull(),
-    createdAt: timestamp('created_at', { withTimezone: true })
-      .notNull()
-      .default(sql`now()`),
-  },
-  (t) => ({
-    pk: primaryKey({ columns: [t.boardId, t.role] }),
-  }),
-);
+export const memberRoleValues: readonly string[] =
+  (active as unknown as { memberRoleValues?: readonly string[] })
+    .memberRoleValues ?? ['owner', 'editor', 'viewer'];
 
-export type BoardRow = typeof boards.$inferSelect;
-export type NewBoardRow = typeof boards.$inferInsert;
-export type AssetRow = typeof assets.$inferSelect;
-export type BoardMemberRow = typeof boardMembers.$inferSelect;
-export type YjsDocumentRow = typeof yjsDocuments.$inferSelect;
+export type BoardRow = typeof pgSchema.boards.$inferSelect;
+export type NewBoardRow = typeof pgSchema.boards.$inferInsert;
+export type AssetRow = typeof pgSchema.assets.$inferSelect;
+export type BoardMemberRow = typeof pgSchema.boardMembers.$inferSelect;
+export type YjsDocumentRow = typeof pgSchema.yjsDocuments.$inferSelect;

@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { eq, and } from 'drizzle-orm';
 import { z } from 'zod';
 import { boards, boardMembers } from '../db/schema';
-import { getDb } from '../db';
+import { getDb } from '../db/client';
 
 const CreateBoardBody = z.object({
   name: z.string().min(1).max(120).optional(),
