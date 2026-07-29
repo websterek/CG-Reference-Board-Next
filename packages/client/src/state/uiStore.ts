@@ -9,11 +9,16 @@
 
 import { create } from 'zustand';
 
-export type ToolName = 'select' | 'rectangle';
+export type ToolName = 'select' | 'rectangle' | 'frame' | 'annotation-freehand';
+
+export type InteractionMode = 'grid' | 'annotation';
 
 export interface UIState {
   activeTool: ToolName;
   setActiveTool: (tool: ToolName) => void;
+
+  interactionMode: InteractionMode;
+  setInteractionMode: (mode: InteractionMode) => void;
 
   selectionCount: number;
   setSelectionCount: (n: number) => void;
@@ -25,6 +30,9 @@ export interface UIState {
 export const useUIStore = create<UIState>((set) => ({
   activeTool: 'select',
   setActiveTool: (tool) => set({ activeTool: tool }),
+
+  interactionMode: 'grid' as const,
+  setInteractionMode: (mode) => set({ interactionMode: mode }),
 
   selectionCount: 0,
   setSelectionCount: (n) => set({ selectionCount: n }),

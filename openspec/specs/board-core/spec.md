@@ -19,17 +19,18 @@ The system SHALL allow users to create a new board via the web UI.
 
 #### Scenario: Board has default state
 - **WHEN** a new board is created
-- **THEN** it contains one default layer
+- **THEN** it contains four fixed layers: `frames`, `media`, `overlay`, `annotations`
 - **THEN** it has no items
 - **THEN** it has a default grid configuration (cell size 20px, snap enabled)
 
 ### Requirement: Grid canvas rendering
-The system SHALL render an infinite grid canvas using PixiJS v8 with pan, zoom, and grid snapping.
+The system SHALL render an infinite grid canvas using PixiJS v8 with pan, zoom, and grid snapping. The grid SHALL be drawn in board (world) coordinates so the parent zoom transform handles scaling. Grid lines SHALL remain visible at every zoom level between `MIN_ZOOM` (0.1) and `MAX_ZOOM` (5). The grid is the source of truth for structured item positions and sizes.
 
 #### Scenario: Canvas initializes
 - **WHEN** user navigates to /board/:id
 - **THEN** a PixiJS Application is created and mounted in the board container
-- **THEN** grid lines are rendered at the configured cell size
+- **THEN** grid lines are rendered at the configured cell size in board coordinates
+- **THEN** the grid is visible at the default zoom
 - **THEN** the viewport is centered on the origin (0, 0)
 
 #### Scenario: Pan canvas
@@ -41,10 +42,14 @@ The system SHALL render an infinite grid canvas using PixiJS v8 with pan, zoom, 
 - **WHEN** user scrolls the mouse wheel
 - **THEN** the viewport zooms in/out centered on the pointer position
 - **THEN** zoom level is clamped between 0.1x and 5x
+- **THEN** grid lines remain visible at every zoom level in the clamped range
+- **THEN** grid line spacing in screen pixels scales proportionally to zoom
 
 #### Scenario: Grid lines update on zoom
 - **WHEN** zoom level changes
-- **THEN** grid line spacing adjusts to maintain readability (major/minor lines)
+- **THEN** grid lines reposition as the world transform scales
+- **THEN** lines are drawn from `floor(viewportMin/cellSize)*cellSize` to `ceil(viewportMax/cellSize)*cellSize` in board coordinates
+- **THEN** major/minor line distinction is preserved by line weight, not by which lines are visible
 
 ### Requirement: Rectangle item creation
 The system SHALL allow users to create rectangle items on the board.
@@ -83,19 +88,27 @@ The system SHALL allow users to select rectangle items on the board.
 - **THEN** selection handles appear on all selected items
 
 ### Requirement: Rectangle movement
-The system SHALL allow users to move rectangle items on the board.
+The system SHALL allow users to move rectangle items on the board. Movement SHALL be cell-quantized: every pointer-move during drag commits a cell-aligned position through `GridService.quantizeRect`. The system SHALL enforce same-layer non-overlap: a move that would cause the rectangle to overlap another media item SHALL be rejected and the rectangle SHALL return to its last valid position.
 
-#### Scenario: Drag to move
+#### Scenario: Drag to move with cell quantization
 - **WHEN** user drags a selected rectangle
 - **THEN** the rectangle follows the pointer during drag
-- **THEN** the rectangle snaps to grid continuously during drag (visual feedback)
-- **THEN** on pointer up, the final snapped position is committed
-- **THEN** the rectangle position updates in real-time for other collaborators
+- **THEN** on every pointer-move, the position is quantized to integer cell coordinates and committed
+- **THEN** the persisted position is always a multiple of `gridConfig.cellSize`
+- **THEN** on pointer up, the final quantized position remains committed
+- **THEN** the position updates in real-time for other collaborators
+
+#### Scenario: Move rejected on overlap
+- **WHEN** user drags a rectangle to a position that would overlap another media item
+- **THEN** the move is rejected at that pointer position
+- **THEN** the rectangle returns to its last valid position
+- **THEN** no Yjs transaction is written for the rejected move
 
 #### Scenario: Move with arrow keys
 - **WHEN** a rectangle is selected and user presses arrow keys
 - **THEN** the rectangle moves one grid cell per key press
-- **THEN** the position snaps to grid
+- **THEN** the position is a multiple of `gridConfig.cellSize`
+- **THEN** arrow key moves that would cause overlap are rejected
 
 ### Requirement: Rectangle deletion
 The system SHALL allow users to delete rectangle items from the board.
@@ -144,14 +157,25 @@ The system SHALL define an extensible item type registry in the domain package. 
 - **THEN** the contract is "single registration point + per-type implementation," not "no changes required"
 
 ### Requirement: Layer model
-The system SHALL support multiple ordered layers for organizing items.
+The system SHALL support four fixed semantic layer kinds: `frame`, `media`, `overlay`, `annotation`. Each board SHALL contain exactly one layer of each kind. The item registry SHALL auto-route each item type to its declared `LayerKind`. The user SHALL NOT manually choose a layer for an item. Z-order from back to front SHALL be `frame < media < overlay < annotation`.
 
-#### Scenario: Default layer exists
-- **WHEN** a board is created
-- **THEN** it has one default layer named "Layer 1"
-- **THEN** all new items are added to the current active layer
+#### Scenario: Board has four fixed layers on creation
+- **WHEN** a new board is created
+- **THEN** it contains exactly four layers: `frames`, `media`, `overlay`, `annotations`
+- **THEN** the layers have stable IDs and z-order
 
-#### Scenario: Layer ordering
-- **WHEN** items exist on multiple layers
+#### Scenario: Items are auto-routed by type
+- **WHEN** user creates a rectangle item
+- **THEN** the item is added to the layer with kind `media`
+- **THEN** no UI prompt asks the user to pick a layer
+
+#### Scenario: Layer ordering preserved across reload
+- **WHEN** items exist on multiple layer kinds
 - **THEN** items on higher layers render above items on lower layers
 - **THEN** layer order is persisted and restored on reload
+
+#### Scenario: Legacy single-layer board migrates
+- **WHEN** a board created before this change is opened
+- **THEN** the document migrates to four fixed layers in one Yjs transaction
+- **THEN** existing items are reassigned to the `media` layer
+- **THEN** the legacy `default` layer is removed

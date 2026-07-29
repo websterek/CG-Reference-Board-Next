@@ -27,6 +27,17 @@ export {
   isRectangleItem,
   getRectangleBounds,
   rectangleHitTest,
+  layerKindFor,
+  defaultLayerIdFor,
+  FrameItemDefinition,
+  FrameAttrsSchema,
+  DEFAULT_FRAME_ATTRS,
+  isFrameItem,
+  AnnotationItemDefinition,
+  AnnotationAttrsSchema,
+  DEFAULT_ANNOTATION_ATTRS,
+  isAnnotationItem,
+  getAnnotationBounds,
 } from './items/registry';
 export {
   ImageItemDefinition,
@@ -37,3 +48,5 @@ export {
 export type { ItemTypeDefinition } from './items/index';
 export type { ImageAttrs, ImageStatus } from './items/image';
 export type { RectangleAttrs } from './items/rectangle';
+export type { FrameAttrs } from './items/frame';
+export type { AnnotationAttrs } from './items/annotation';

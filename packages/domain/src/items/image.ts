@@ -34,6 +34,7 @@ export const DEFAULT_IMAGE_SIZE = { width: 200, height: 200 };
  */
 export const ImageItemDefinition: ItemTypeDefinition<ImageAttrs> = {
   type: 'image' as ItemType,
+  layerKind: 'media' as const,
   schema: ImageAttrsSchema,
   defaultAttrs: { assetId: '', mimeType: 'image/png', status: 'loading' },
   defaultSize: DEFAULT_IMAGE_SIZE,

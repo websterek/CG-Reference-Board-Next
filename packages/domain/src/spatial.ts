@@ -8,7 +8,7 @@
  */
 
 import RBush from 'rbush';
-import type { BoardItem, ItemId, Rect } from './board';
+import type { BoardItem, ItemId, LayerKind, Rect } from './board';
 
 interface IndexedItem {
   minX: number;
@@ -16,6 +16,7 @@ interface IndexedItem {
   maxX: number;
   maxY: number;
   id: ItemId;
+  layerKind: LayerKind;
 }
 
 class IndexedItemRBush extends RBush<IndexedItem> {
@@ -26,7 +27,7 @@ export class SpatialIndex {
   private readonly tree = new IndexedItemRBush();
   private readonly byId = new Map<ItemId, IndexedItem>();
 
-  insert(item: BoardItem): void {
+  insert(item: BoardItem, layerKind: LayerKind): void {
     this.remove(item.id); // idempotent
     const idx: IndexedItem = {
       minX: item.x,
@@ -34,6 +35,7 @@ export class SpatialIndex {
       maxX: item.x + item.width,
       maxY: item.y + item.height,
       id: item.id,
+      layerKind,
     };
     this.tree.insert(idx);
     this.byId.set(item.id, idx);
@@ -47,8 +49,8 @@ export class SpatialIndex {
     }
   }
 
-  update(item: BoardItem): void {
-    this.insert(item); // remove+insert is the canonical RBush pattern
+  update(item: BoardItem, layerKind: LayerKind): void {
+    this.insert(item, layerKind); // remove+insert is the canonical RBush pattern
   }
 
   /** Return items whose bounding box intersects `bounds` (board coords). */
@@ -83,6 +85,26 @@ export class SpatialIndex {
         maxY: viewport.y + viewport.height,
       })
       .map((entry) => entry.id);
+  }
+
+  /**
+   * Find items of a specific layer kind that overlap the given rect.
+   * Returns the full IndexedItem entries (with id and layerKind) so callers
+   * can use the result for both overlap checks and further processing.
+   */
+  findOverlapping(
+    rect: Rect,
+    kind: LayerKind,
+    excludeId?: ItemId,
+  ): IndexedItem[] {
+    return this.tree
+      .search({
+        minX: rect.x,
+        minY: rect.y,
+        maxX: rect.x + rect.width,
+        maxY: rect.y + rect.height,
+      })
+      .filter((entry) => entry.layerKind === kind && entry.id !== excludeId);
   }
 
   clear(): void {

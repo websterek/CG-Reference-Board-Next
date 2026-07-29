@@ -31,7 +31,27 @@ export interface Rect extends Point, Size {}
 
 export type ItemType =
   | 'rectangle'
-  | 'image';
+  | 'image'
+  | 'frame'
+  | 'annotation-stroke';
+
+// ----- Layer kinds -----
+
+export type LayerKind = 'frame' | 'media' | 'overlay' | 'annotation';
+
+export interface LayerKindMeta {
+  readonly id: LayerId;
+  readonly name: string;
+  readonly kind: LayerKind;
+  readonly order: number;
+}
+
+export const DEFAULT_LAYERS: ReadonlyArray<LayerKindMeta> = Object.freeze([
+  { id: asLayerId('frames'), name: 'Frames', kind: 'frame', order: 0 },
+  { id: asLayerId('media'), name: 'Media', kind: 'media', order: 1 },
+  { id: asLayerId('overlay'), name: 'Overlay', kind: 'overlay', order: 2 },
+  { id: asLayerId('annotations'), name: 'Annotations', kind: 'annotation', order: 3 },
+]);
 
 // ----- Grid -----
 
@@ -76,6 +96,7 @@ export interface Layer {
   readonly order: number;    // sort order (lower = behind)
   readonly visible: boolean;
   readonly locked: boolean;
+  readonly kind: LayerKind;
 }
 
 // ----- Items -----
@@ -129,9 +150,10 @@ export const LayerSchema = z.object({
   order: z.number().int(),
   visible: z.boolean(),
   locked: z.boolean(),
+  kind: z.enum(['frame', 'media', 'overlay', 'annotation']),
 });
 
-export const ItemTypeSchema = z.enum(['rectangle', 'image']);
+export const ItemTypeSchema = z.enum(['rectangle', 'image', 'frame', 'annotation-stroke']);
 
 export const BoardItemSchema = z.object({
   id: z.string().min(1),
@@ -141,7 +163,13 @@ export const BoardItemSchema = z.object({
   width: z.number().nonnegative(),
   height: z.number().nonnegative(),
   rotation: z.number(),
-  layerId: z.string().min(1),
+  layerId: z
+    .string()
+    .min(1)
+    .refine(
+      (val) => ['frames', 'media', 'overlay', 'annotations'].includes(val),
+      { message: 'layerId must be one of: frames, media, overlay, annotations' },
+    ),
   attrs: z.record(z.string(), z.unknown()),
 });
 

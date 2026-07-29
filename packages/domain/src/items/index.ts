@@ -13,10 +13,11 @@
  */
 
 import type { z } from 'zod';
-import type { BoardItem, ItemType, Point, Rect } from '../board';
+import type { BoardItem, ItemType, LayerKind, Point, Rect } from '../board';
 
 export interface ItemTypeDefinition<Attrs = unknown> {
   readonly type: ItemType;
+  readonly layerKind: LayerKind;
   readonly schema: z.ZodType<Attrs>;
   readonly defaultAttrs: Attrs;
   readonly defaultSize: { width: number; height: number };

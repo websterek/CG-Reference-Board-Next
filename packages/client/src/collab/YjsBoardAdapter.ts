@@ -17,6 +17,14 @@ import type {
   BoardItem,
   ItemId,
   LayerId,
+  LayerKind,
+} from '@gridboard/domain';
+import {
+  layerKindFor,
+  defaultLayerIdFor,
+  GridService,
+  DEFAULT_LAYERS,
+  DEFAULT_GRID_CONFIG,
 } from '@gridboard/domain';
 
 export interface RemoteUpdate {
@@ -42,6 +50,7 @@ export class YjsBoardAdapter {
     this.itemsMap = this.rootMap.get('items') as Y.Map<Y.Map<unknown>> ?? this.ensureItems();
     this.layersArr = this.rootMap.get('layers') as Y.Array<Y.Map<unknown>> ?? this.ensureLayers();
     this.metaMap = this.rootMap.get('meta') as Y.Map<unknown> ?? this.ensureMeta();
+    this.ensureFixedLayers();
     this.subscribe();
   }
 
@@ -60,8 +69,9 @@ export class YjsBoardAdapter {
   applyLocalAction(update: { id: string; partial: Partial<BoardItem> }): void {
     const id = update.id;
     this.doc.transact(() => {
+      const isNew = !this.itemsMap.has(id);
       const entry = this.itemsMap.get(id) ?? new Y.Map<unknown>();
-      if (!this.itemsMap.has(id)) this.itemsMap.set(id, entry);
+      if (isNew) this.itemsMap.set(id, entry);
       for (const [k, v] of Object.entries(update.partial)) {
         if (k === 'x' || k === 'y') {
           // Position must be written as a nested sub-map (D1).
@@ -73,9 +83,19 @@ export class YjsBoardAdapter {
           pos.set(k as 'x' | 'y', v as number);
           // Mirror scalar for read convenience (read-only clients without pos will still see x/y).
           entry.set(k, v);
+        } else if (k === 'layerId' && isNew) {
+          // On create, force layerId from the item type (D3 auto-routing).
+          // The caller-supplied value is ignored; we compute from `type`.
+          // (We'll set it after the loop once `type` is known.)
         } else if (v !== undefined) {
           entry.set(k, v);
         }
+      }
+      // After writing all fields, force layerId from type for new items.
+      if (isNew) {
+        const type = (entry.get('type') as string | undefined) ?? 'rectangle';
+        const kind = layerKindFor(type as BoardItem['type']);
+        entry.set('layerId', defaultLayerIdFor(kind));
       }
     });
   }
@@ -100,7 +120,10 @@ export class YjsBoardAdapter {
   createLocal(item: BoardItem): void {
     this.doc.transact(() => {
       const entry = new Y.Map<unknown>();
-      this.writeAll(entry, item);
+      // Force layerId from the item type (D3 auto-routing).
+      const kind = layerKindFor(item.type);
+      const routedItem = { ...item, layerId: defaultLayerIdFor(kind) };
+      this.writeAll(entry, routedItem);
       this.itemsMap.set(item.id, entry);
     });
   }
@@ -149,8 +172,16 @@ export class YjsBoardAdapter {
       // acceptance). For larger boards a targeted observer (only the keys
       // mentioned in the event path) would replace this loop.
       this.itemsMap.forEach((entry, key) => {
-        const u: RemoteUpdate = { id: key, partial: this.toPartial(entry) };
-        for (const cb of this.listeners) cb(u);
+        const raw: RemoteUpdate = { id: key, partial: this.toPartial(entry) };
+        const validated = this.validateAndCorrectRemote(raw);
+        if (validated === null) return; // drop — no valid placement
+        for (const cb of this.listeners) cb(validated);
+        // If corrected, queue a follow-up local write so other peers converge.
+        if (validated !== raw) {
+          setTimeout(() => {
+            this.applyLocalAction(validated);
+          }, 0);
+        }
       });
       // First-time initial sync signal.
       for (const cb of this.initialListeners) cb();
@@ -220,14 +251,6 @@ export class YjsBoardAdapter {
     if (!layers) {
       layers = new Y.Array();
       this.rootMap.set('layers', layers);
-      // Default layer (board-core spec.md: one default layer named "Layer 1")
-      const def = new Y.Map<unknown>();
-      def.set('id', 'default');
-      def.set('name', 'Layer 1');
-      def.set('order', 0);
-      def.set('visible', true);
-      def.set('locked', false);
-      layers.push([def]);
     }
     return layers;
   }
@@ -239,6 +262,124 @@ export class YjsBoardAdapter {
       this.rootMap.set('meta', meta);
     }
     return meta;
+  }
+
+  /**
+   * Bootstrap four fixed layers (D3). Runs on every constructor call.
+   *
+   * - Fresh board (0 layers): seed the four DEFAULT_LAYERS in z-order.
+   * - Legacy board (1 layer with id='default', name='Layer 1'): seed the four
+   *   fixed layers, reassign all items to 'media', remove the legacy layer.
+   * - Already migrated (4+ layers with fixed ids): no-op.
+   */
+  private ensureFixedLayers(): void {
+    const current = this.layersArr.toArray();
+    const isLegacy =
+      current.length === 1 &&
+      current[0]?.get('id') === 'default' &&
+      current[0]?.get('name') === 'Layer 1';
+    const isFresh = current.length === 0;
+
+    if (!isLegacy && !isFresh) return;
+
+    this.doc.transact(() => {
+      // Insert the four fixed layers in z-order.
+      for (const meta of DEFAULT_LAYERS) {
+        const entry = new Y.Map<unknown>();
+        entry.set('id', meta.id);
+        entry.set('name', meta.name);
+        entry.set('order', meta.order);
+        entry.set('visible', true);
+        entry.set('locked', false);
+        entry.set('kind', meta.kind);
+        this.layersArr.push([entry]);
+      }
+
+      // Legacy migration: reassign all items to 'media'.
+      if (isLegacy) {
+        this.itemsMap.forEach((entry) => {
+          entry.set('layerId', 'media');
+        });
+
+        // Remove the legacy 'default' layer (it's at index 0 before the four new ones).
+        this.layersArr.delete(0, 1);
+      }
+    });
+  }
+
+  /**
+   * Validate a remote update against the same-layer non-overlap invariant.
+   *
+   * Reads the current item state from the Yjs doc, computes the implied full
+   * item after applying the update, and runs `canPlace` against all other items
+   * of the same layer kind.
+   *
+   * @returns The update unchanged if valid; a corrected update with a free-cell
+   *          position if one is found; or `null` if no free cell exists (the
+   *          update is dropped — a future write from the originator's
+   *          lastValidBounds will be applied).
+   */
+  validateAndCorrectRemote(update: RemoteUpdate): RemoteUpdate | null {
+    const entry = this.itemsMap.get(update.id);
+    if (!entry) return update; // item doesn't exist yet — allow creation
+
+    const item = this.toDomainItem(update.id, entry);
+    const kind = layerKindFor(item.type);
+
+    // Compute the implied rect after applying the update.
+    const proposed = {
+      x: (update.partial.x as number | undefined) ?? item.x,
+      y: (update.partial.y as number | undefined) ?? item.y,
+      width: (update.partial.width as number | undefined) ?? item.width,
+      height: (update.partial.height as number | undefined) ?? item.height,
+    };
+
+    // Build the set of other items (same kind) to check against.
+    const others: Array<{
+      id: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      layerKind: LayerKind;
+    }> = [];
+    this.itemsMap.forEach((otherEntry, otherKey) => {
+      if (otherKey === update.id) return;
+      const other = this.toDomainItem(otherKey, otherEntry);
+      const otherKind = layerKindFor(other.type);
+      others.push({
+        id: other.id,
+        x: other.x,
+        y: other.y,
+        width: other.width,
+        height: other.height,
+        layerKind: otherKind,
+      });
+    });
+
+    if (GridService.canPlace(proposed, others, kind, update.id)) {
+      return update;
+    }
+
+    // Overlap detected — try to find a free cell.
+    const candidates = GridService.findFreeCells(proposed, others, kind, update.id, {
+      cellSize: DEFAULT_GRID_CONFIG.cellSize,
+      radius: 8,
+    });
+
+    if (candidates.length === 0) return null;
+
+    const corrected = candidates[0]!;
+    return {
+      id: update.id,
+      partial: {
+        ...update.partial,
+        x: corrected.x,
+        y: corrected.y,
+        width: corrected.width,
+        height: corrected.height,
+      },
+    };
   }
 }
 
