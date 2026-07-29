@@ -1,3 +1,4 @@
+# --- existing root ignores ---
 # Dependencies
 node_modules/
 .pnpm-store/

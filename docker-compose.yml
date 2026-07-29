@@ -1,0 +1,98 @@
+# Production docker-compose — Postgres + MinIO + server.
+# A future nginx reverse-proxy was deferred per design.md D6.
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: gridboard
+      POSTGRES_PASSWORD: gridboard
+      POSTGRES_DB: gridboard
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gridboard"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    # One-shot migration sidecar (task 3.9). Runs BEFORE the server accepts
+    # connections — server has `depends_on: { migrate: { condition: service_completed_successfully } }`.
+    #
+    # The entry path `packages/server/dist/db/migrate.js` is the compiled
+    # output of `src/db/migrate.ts` (Drizzle migrator run). It is compiled
+    # by the `tsc -p tsconfig.json` step in the `build-server` stage of
+    # `packages/server/Dockerfile`. The src→dist mapping is direct because
+    # `rootDir: src` (see packages/server/tsconfig.json).
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://gridboard:gridboard@postgres:5432/gridboard
+      NODE_ENV: production
+    # Runs Drizzle migrations then exits 0 — server's depends_on gates on this.
+    command: ["node", "packages/server/dist/db/migrate.js"]
+    restart: "no"
+
+  server:
+    build:
+      context: .
+      dockerfile: packages/server/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+      minio:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://gridboard:gridboard@postgres:5432/gridboard
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      STORAGE_BACKEND: minio
+      S3_ENDPOINT: http://minio:9000
+      S3_ACCESS_KEY: minioadmin
+      S3_SECRET_KEY: minioadmin
+      S3_BUCKET: gridboard-assets
+      S3_FORCE_PATH_STYLE: "true"
+      PORT: "3000"
+      HOST: "0.0.0.0"
+      NODE_ENV: production
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  client:
+    build:
+      context: .
+      dockerfile: packages/client/Dockerfile
+    depends_on:
+      - server
+    ports:
+      - "8080:8080"
+
+volumes:
+  postgres_data:
+  minio_data:

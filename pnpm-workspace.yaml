@@ -1,0 +1,4 @@
+packages:
+  - 'packages/domain'
+  - 'packages/client'
+  - 'packages/server'

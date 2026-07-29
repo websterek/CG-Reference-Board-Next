@@ -1,0 +1,9 @@
+# Dev client Dockerfile — vite dev server with HMR.
+FROM node:20-alpine AS dev
+RUN corepack enable
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml .npmrc ./
+COPY packages/domain/package.json packages/domain/
+COPY packages/client/package.json packages/client/
+RUN pnpm install
+CMD ["pnpm", "--filter", "@gridboard/client", "dev", "--host", "0.0.0.0"]

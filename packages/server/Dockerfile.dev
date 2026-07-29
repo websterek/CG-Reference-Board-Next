@@ -1,0 +1,11 @@
+# Dev server Dockerfile (task 1.10): hot-reload via tsx watch.
+FROM node:20-alpine AS dev
+RUN corepack enable
+WORKDIR /app
+COPY package.json pnpm-workspace.yaml .npmrc ./
+COPY packages/domain/package.json packages/domain/
+COPY packages/server/package.json packages/server/
+COPY packages/client/package.json packages/client/
+RUN pnpm install
+# Source mounted via volume in docker-compose.dev.yml
+CMD ["pnpm", "--filter", "@gridboard/server", "dev"]
