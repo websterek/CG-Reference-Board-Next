@@ -5,6 +5,8 @@ import {
   ITEM_TYPES,
   isRectangleItem,
   asItemId,
+  defaultLayerIdFor,
+  layerKindFor,
 } from '../index';
 
 describe('ITEM_TYPES registry', () => {
@@ -45,6 +47,39 @@ describe('ITEM_TYPES registry', () => {
       attrs: { fillColor: '#ffffff', strokeColor: '#000000', strokeWidth: 1 },
     };
     expect(isRectangleItem(item)).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 11.1 — Correct layerId on item creation
+// ---------------------------------------------------------------------------
+
+describe('defaultLayerIdFor(layerKindFor(type)) (Task 11.1)', () => {
+  it('resolves frame → frames', () => {
+    expect(defaultLayerIdFor(layerKindFor('frame'))).toBe('frames');
+  });
+
+  it('resolves rectangle → media', () => {
+    // The registry maps rectangle to the 'media' layer kind, whose default
+    // layer id is 'media'. Controller createItem paths use this same chain.
+    expect(defaultLayerIdFor(layerKindFor('rectangle'))).toBe('media');
+  });
+
+  it('resolves image → media', () => {
+    expect(defaultLayerIdFor(layerKindFor('image'))).toBe('media');
+  });
+
+  it('resolves annotation-stroke → annotations', () => {
+    expect(defaultLayerIdFor(layerKindFor('annotation-stroke'))).toBe('annotations');
+  });
+
+  it('every LayerKind has a defaultLayerIdFor entry', () => {
+    // Regression guard: if a new LayerKind is added but DEFAULT_LAYERS is not
+    // updated, defaultLayerIdFor would throw.
+    const kinds = ['frame', 'media', 'overlay', 'annotation'] as const;
+    for (const k of kinds) {
+      expect(() => defaultLayerIdFor(k)).not.toThrow();
+    }
   });
 });
 

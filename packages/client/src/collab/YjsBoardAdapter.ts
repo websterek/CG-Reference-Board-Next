@@ -23,7 +23,9 @@ import {
   layerKindFor,
   defaultLayerIdFor,
   GridService,
-  DEFAULT_LAYERS,
+  getAllLayers,
+  sortByZOrder,
+  tryGetLayerDef,
   DEFAULT_GRID_CONFIG,
 } from '@gridboard/domain';
 
@@ -265,9 +267,9 @@ export class YjsBoardAdapter {
   }
 
   /**
-   * Bootstrap four fixed layers (D3). Runs on every constructor call.
+   * Bootstrap the four default layers (D3). Runs on every constructor call.
    *
-   * - Fresh board (0 layers): seed the four DEFAULT_LAYERS in z-order.
+   * - Fresh board (0 layers): seed the registry's default kinds in z-order.
    * - Legacy board (1 layer with id='default', name='Layer 1'): seed the four
    *   fixed layers, reassign all items to 'media', remove the legacy layer.
    * - Already migrated (4+ layers with fixed ids): no-op.
@@ -283,15 +285,20 @@ export class YjsBoardAdapter {
     if (!isLegacy && !isFresh) return;
 
     this.doc.transact(() => {
-      // Insert the four fixed layers in z-order.
-      for (const meta of DEFAULT_LAYERS) {
+      // Insert layers in z-order from the registry. The registry is the
+      // single source of truth for which kinds exist and their order.
+      const orderedKinds = sortByZOrder();
+      const allLayers = getAllLayers();
+      for (const kind of orderedKinds) {
+        const def = allLayers.find((d) => d.kind === kind) ?? tryGetLayerDef(kind);
+        if (!def) continue;
         const entry = new Y.Map<unknown>();
-        entry.set('id', meta.id);
-        entry.set('name', meta.name);
-        entry.set('order', meta.order);
-        entry.set('visible', true);
-        entry.set('locked', false);
-        entry.set('kind', meta.kind);
+        entry.set('id', def.layerId);
+        entry.set('name', def.displayName);
+        entry.set('order', def.zOrder);
+        entry.set('visible', def.defaultVisible);
+        entry.set('locked', def.defaultLocked);
+        entry.set('kind', def.kind);
         this.layersArr.push([entry]);
       }
 

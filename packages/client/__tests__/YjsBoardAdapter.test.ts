@@ -181,7 +181,7 @@ describe('YjsBoardAdapter', () => {
     expect(layerIds).toEqual(['frames', 'media', 'overlay', 'annotations']);
 
     const orders = layers.map((l) => l.get('order'));
-    expect(orders).toEqual([0, 1, 2, 3]);
+    expect(orders).toEqual([0, 1, 2, 4]);
 
     // Each layer should have kind set.
     const kinds = layers.map((l) => l.get('kind'));

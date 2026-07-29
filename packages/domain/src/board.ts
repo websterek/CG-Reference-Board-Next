@@ -4,6 +4,7 @@
  */
 
 import { z } from 'zod';
+import { tryGetLayerDef, getLayerIds } from './layers/registry';
 
 // ----- IDs (branded via nominal typing) -----
 
@@ -37,21 +38,16 @@ export type ItemType =
 
 // ----- Layer kinds -----
 
-export type LayerKind = 'frame' | 'media' | 'overlay' | 'annotation';
-
-export interface LayerKindMeta {
-  readonly id: LayerId;
-  readonly name: string;
-  readonly kind: LayerKind;
-  readonly order: number;
-}
-
-export const DEFAULT_LAYERS: ReadonlyArray<LayerKindMeta> = Object.freeze([
-  { id: asLayerId('frames'), name: 'Frames', kind: 'frame', order: 0 },
-  { id: asLayerId('media'), name: 'Media', kind: 'media', order: 1 },
-  { id: asLayerId('overlay'), name: 'Overlay', kind: 'overlay', order: 2 },
-  { id: asLayerId('annotations'), name: 'Annotations', kind: 'annotation', order: 3 },
-]);
+/**
+ * Open-ended layer kind identifier.
+ *
+ * The legacy closed union (`'frame' | 'media' | 'overlay' | 'annotation'`)
+ * was replaced with `string` as part of the `layer-registry` change. The
+ * set of valid kinds is now defined by the `LayerDefinition` registry
+ * (see `packages/domain/src/layers/registry.ts`). Type safety is provided
+ * at runtime via `getLayerDef(kind)`, which throws for unknown kinds.
+ */
+export type LayerKind = string;
 
 // ----- Grid -----
 
@@ -150,7 +146,17 @@ export const LayerSchema = z.object({
   order: z.number().int(),
   visible: z.boolean(),
   locked: z.boolean(),
-  kind: z.enum(['frame', 'media', 'overlay', 'annotation']),
+  // Layer kind is an open-ended string validated against the registry
+  // (see packages/domain/src/layers/registry.ts). This replaces the
+  // previous hardcoded `z.enum(['frame', 'media', 'overlay', 'annotation'])`
+  // so that new kinds registered at runtime are accepted without a schema
+  // change.
+  kind: z
+    .string()
+    .min(1)
+    .refine((kind) => tryGetLayerDef(kind) !== undefined, {
+      message: 'Unknown layer kind',
+    }),
 });
 
 export const ItemTypeSchema = z.enum(['rectangle', 'image', 'frame', 'annotation-stroke']);
@@ -166,10 +172,12 @@ export const BoardItemSchema = z.object({
   layerId: z
     .string()
     .min(1)
-    .refine(
-      (val) => ['frames', 'media', 'overlay', 'annotations'].includes(val),
-      { message: 'layerId must be one of: frames, media, overlay, annotations' },
-    ),
+    // Registry-driven layer ID validation. The allowed list is derived
+    // from registered `LayerDefinition.layerId` values, so adding a new
+    // kind to the registry automatically extends the valid set.
+    .refine((val) => getLayerIds().includes(val), {
+      message: 'layerId must be one of the registered layer IDs',
+    }),
   attrs: z.record(z.string(), z.unknown()),
 });
 

@@ -8,7 +8,7 @@
  */
 
 import type { BoardItem, ItemType, LayerKind, LayerId, Point, Rect } from '../board';
-import { DEFAULT_LAYERS } from '../board';
+import { getLayerDef } from '../layers/registry';
 import {
   DEFAULT_RECTANGLE_ATTRS,
   getRectangleBounds,
@@ -89,10 +89,10 @@ export function layerKindFor(type: ItemType): LayerKind {
 
 /**
  * Return the default layer ID for a given LayerKind.
- * Throws if no default layer matches the kind.
+ *
+ * Reads the layer ID from the registry so the mapping is registry-driven
+ * rather than hardcoded. Throws if the kind is not registered.
  */
 export function defaultLayerIdFor(kind: LayerKind): LayerId {
-  const meta = DEFAULT_LAYERS.find((m) => m.kind === kind);
-  if (!meta) throw new Error(`No default layer for kind ${kind}`);
-  return meta.id;
+  return getLayerDef(kind).layerId;
 }

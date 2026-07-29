@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Four fixed semantic layer kinds auto-routed by item type. The item registry declares each item's `LayerKind`; users never choose a layer. Boards contain exactly one layer of each kind with stable IDs and z-order. Legacy single-layer boards migrate to the four fixed kinds on first load.
+Semantic layer kinds are defined through the `LayerDefinition` registry (see the `layer-registry` capability). The registry is the single source of truth for which kinds exist, their z-order, hit-priority, snap policy, overlap rules, and containment policy. Items are auto-routed by `ItemTypeDefinition.layerKind` so users never choose a layer. Boards are pre-populated with the four default kinds (`frame`, `media`, `overlay`, `annotation`) but additional kinds can be registered at runtime. Legacy single-layer boards migrate to the four default kinds on first load.
 
 ---
 
@@ -10,13 +10,61 @@ Four fixed semantic layer kinds auto-routed by item type. The item registry decl
 
 ## Requirements
 
-### Requirement: Four fixed semantic layer kinds
-The system SHALL define four fixed `LayerKind` values: `frame`, `media`, `overlay`, `annotation`. Each board SHALL contain exactly one layer of each kind. Layer z-order from back to front SHALL be `frame < media < overlay < annotation`.
+### Requirement: Registry-driven kinds
+The system SHALL define layer kinds through the `LayerDefinition` registry rather than a hardcoded closed union. The registry SHALL be the single source of truth for which kinds exist, their z-order, hit-priority, snap policy, overlap rules, and containment policy. The four default kinds (`frame`, `media`, `overlay`, `annotation`) SHALL be pre-populated at module load with the policy values from the council decision table.
 
-#### Scenario: Board has four fixed layers
-- **WHEN** a board is created or first loaded
-- **THEN** it contains exactly four layers
-- **THEN** the layers are named and ordered: `frames`, `media`, `overlay`, `annotations` (back to front)
+#### Scenario: Kinds come from registry
+- **WHEN** the system needs to know which layer kinds exist
+- **THEN** it queries the `LayerDefinition` registry
+- **THEN** no hardcoded layer-kind union is referenced outside the registry
+
+#### Scenario: Default kinds are pre-populated
+- **WHEN** the registry module is loaded
+- **THEN** it contains exactly four entries: `frame`, `media`, `overlay`, `annotation`
+- **THEN** the entries carry the policy values defined in the council decision table
+
+#### Scenario: Adding a kind is one registration
+- **WHEN** a developer adds a new layer kind
+- **THEN** they register one `LayerDefinition` entry via `addLayer()`
+- **THEN** all derived lists (z-order, hit-priority, schema validation, visibility) update automatically
+- **THEN** no changes are needed in `board.ts`, `controller.ts`, or `LayerSchema`
+
+### Requirement: Backward compatibility
+The system SHALL ensure that existing boards with 4-kind data continue to work after the migration to the registry model. Layer IDs (`frames`, `media`, `overlay`, `annotations`) and layer kinds (`frame`, `media`, `overlay`, `annotation`) SHALL be preserved exactly so persisted data validates unchanged.
+
+#### Scenario: Existing board loads after migration
+- **WHEN** a board created before the registry refactor is opened
+- **THEN** the board's 4 layers map to the 4 default registry entries
+- **THEN** all items retain their layer assignments
+- **THEN** z-order, hit-testing, and overlap rules behave identically to before the refactor
+
+#### Scenario: Layer IDs are unchanged
+- **WHEN** an existing board is loaded after migration
+- **THEN** the layer IDs (`frames`, `media`, `overlay`, `annotations`) are unchanged
+- **THEN** `BoardItemSchema` validation accepts these layer IDs
+
+#### Scenario: Visibility and lock state preserved
+- **WHEN** an existing board has custom visibility or lock state on a layer
+- **THEN** that state is preserved after migration
+- **THEN** the registry's `defaultVisible` and `defaultLocked` do not overwrite persisted state
+
+### Requirement: Kind promotion path
+The system SHALL provide a clear, low-friction path for promoting a new layer kind from concept to production. Adding a new kind SHALL be a single registry entry, not a breaking change spanning multiple files.
+
+#### Scenario: New kind requires one file change
+- **WHEN** a developer adds a new layer kind (e.g., `connector`)
+- **THEN** they create one `LayerDefinition` entry and call `addLayer()`
+- **THEN** no changes are needed in `board.ts`, `controller.ts`, `LayerSchema`, or `BoardItemSchema`
+
+#### Scenario: New kind integrates with existing tooling
+- **WHEN** a new layer kind is registered
+- **THEN** `sortByZOrder()` includes it in the correct position
+- **THEN** `sortByHitPriority()` includes it in the correct position
+- **THEN** `initLayerVisibility()` includes it with the registry default
+- **THEN** `BoardItemSchema` accepts its layer ID
+
+### Requirement: Default z-order and rendering
+The four default kinds SHALL render back to front in this order: `frame` (z=0) behind `media` (z=1) behind `overlay` (z=2) behind `annotation` (z=4). The gap at z=3 leaves room for future kinds (e.g. connector). `sortByZOrder()` SHALL return this order.
 
 #### Scenario: Items render in correct z-order
 - **WHEN** items exist on multiple layer kinds
@@ -55,8 +103,8 @@ The system SHALL persist each layer's `visible` and `locked` flags. Hidden layer
 - **THEN** the item is not selected
 - **THEN** no drag or resize can start on items in the locked layer
 
-### Requirement: Legacy single-layer boards migrate to four fixed kinds
-On first load, the system SHALL detect legacy boards (single layer with id `default` and name `Layer 1`) and migrate them atomically: insert four fixed layers in correct z-order, reassign all existing items to the `media` layer, and remove the legacy layer.
+### Requirement: Legacy single-layer boards migrate to four default kinds
+On first load, the system SHALL detect legacy boards (single layer with id `default` and name `Layer 1`) and migrate them atomically: insert the four default kinds in correct z-order, reassign all existing items to the `media` layer, and remove the legacy layer.
 
 #### Scenario: Legacy board migration
 - **WHEN** a board created before this change is opened
@@ -78,3 +126,16 @@ Items on the `annotation` layer SHALL store raw board coordinates without cell q
 - **WHEN** two annotation strokes overlap
 - **THEN** both strokes persist without rejection
 - **THEN** neither stroke returns to a previous position
+
+### Requirement: Non-empty deletion forbidden
+The system SHALL forbid deletion of a layer that contains items and SHALL forbid deletion of the four default kinds.
+
+#### Scenario: Default kinds are immutable
+- **WHEN** `deleteLayer('frame')` (or any default kind) is called
+- **THEN** an error is thrown
+- **THEN** the entry remains in the registry
+
+#### Scenario: Non-empty custom layer cannot be deleted
+- **WHEN** `deleteLayer('custom-kind', 5)` is called
+- **THEN** an error is thrown indicating the layer has items
+- **THEN** the entry remains in the registry

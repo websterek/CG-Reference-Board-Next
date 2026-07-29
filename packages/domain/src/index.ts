@@ -50,3 +50,28 @@ export type { ImageAttrs, ImageStatus } from './items/image';
 export type { RectangleAttrs } from './items/rectangle';
 export type { FrameAttrs } from './items/frame';
 export type { AnnotationAttrs } from './items/annotation';
+
+// Layer registry (replaces the closed `LayerKind` union with a runtime
+// registry; see openspec/changes/layer-registry)
+export {
+  DEFAULT_KINDS,
+  getLayerDef,
+  tryGetLayerDef,
+  getAllLayers,
+  sortByZOrder,
+  sortByHitPriority,
+  getLayerIds,
+  initLayerVisibility,
+  addLayer,
+  deleteLayer,
+  isDefaultKind,
+  registerOnChange,
+} from './layers/registry';
+export type {
+  LayerDefinition,
+  SnapPolicy,
+  OverlapRule,
+  ContainmentPolicy,
+  RegistryChangeListener,
+  RegistryUnsubscribe,
+} from './layers/registry';

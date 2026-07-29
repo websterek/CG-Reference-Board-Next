@@ -20,7 +20,12 @@ import {
   GridService,
   ITEM_TYPES,
   SpatialIndex,
+  defaultLayerIdFor,
   layerKindFor,
+  sortByZOrder,
+  sortByHitPriority,
+  initLayerVisibility,
+  registerOnChange,
   type BoardItem,
   type CameraState,
   type ItemId,
@@ -57,12 +62,17 @@ export type ToolbarAction =
   | { type: 'set-mode'; mode: 'grid' | 'annotation' }
   | { type: 'delete-selected' };
 
-const LAYER_Z_ORDER: ReadonlyArray<LayerKind> = ['frame', 'media', 'overlay', 'annotation'];
+// Z-order and hit-priority are derived from the layer registry
+// (`packages/domain/src/layers/registry.ts`). The registry is the
+// single source of truth — no hardcoded kind lists live in this file.
+// Helpers `sortByZOrder()` and `sortByHitPriority()` return fresh arrays
+// on every call, so adding a kind at runtime immediately takes effect
+// after `addLayer()` triggers the change subscription wired in init().
 
 export class CanvasController {
   private app: Application | null = null;
   private world: Container | null = null;
-  private layerContainers = new Map<LayerKind, Container>();
+  private layerContainers = new Map<string, Container>();
   private selectionLayer: Container | null = null;
   private toolOverlay: Container | null = null;
   private gridGraphics: Graphics | null = null;
@@ -82,8 +92,32 @@ export class CanvasController {
   /** Tool registry: maps tool name to Tool instance. */
   private toolRegistry = new Map<string, Tool>();
 
-  /** Last valid bounds for each item, used as revert target on rejection. */
+  /**
+   * Last valid bounds for each item, used as revert target on rejection.
+   *
+   * KNOWN LIMITATION (Bug #15, data-integrity-bugfixes): this map is
+   * controller-local and NOT persisted. If the controller is recreated
+   * (HMR, navigation, page reload), `lastValidBounds` is empty and the
+   * first invalid move/resize after recreation has no revert target —
+   * the rejected item stays at the invalid bounds until the user moves it
+   * away. Accepted for v1; revisit and wire into Yjs awareness or another
+   * durable store if HMR / navigation becomes a real problem in practice.
+   */
   private lastValidBounds = new Map<ItemId, Rect>();
+
+  /**
+   * Buffered per-item coordinate updates (single-slot per item ID, see
+   * design.md D3). `queueUpdate` stores a partial update here; `flushQueuedUpdates`
+   * applies all buffered updates via `updateItem` and clears the buffer.
+   */
+  private queuedUpdate = new Map<ItemId, { x?: number; y?: number }>();
+
+  /**
+   * Most recent pointer position in board coordinates. Updated on every
+   * pointermove so `endDrag` can pass a real position (instead of `{0,0}`)
+   * to `tool.onPointerUp`.
+   */
+  private lastPointerBoard: Point = { x: 0, y: 0 };
 
   /** Resize state: which item is being resized and from which corner. */
   private resizeState: {
@@ -93,13 +127,21 @@ export class CanvasController {
     startBounds: Rect;
   } | null = null;
 
-  /** Per-layer visibility flags. Default all-true; layers panel (future) sets these. */
-  private layerVisible = new Map<LayerKind, boolean>([
-    ['frame', true],
-    ['media', true],
-    ['overlay', true],
-    ['annotation', true],
-  ]);
+  /**
+   * Per-layer visibility flags. Default-initialized from the registry's
+   * `defaultVisible` values. The layers panel (future) toggles these.
+   * The map is rebuilt by `rebuildLayerState()` when the registry changes
+   * (e.g. after `addLayer()` or `deleteLayer()`) so new kinds pick up
+   * their default visibility immediately.
+   */
+  private layerVisible: Map<LayerKind, boolean> = initLayerVisibility();
+
+  /**
+   * Unsubscribe handle returned by `registerOnChange` during init().
+   * Called in destroy() so a destroyed controller does not respond to
+   * later registry mutations.
+   */
+  private unsubscribeRegistry: (() => void) | null = null;
 
   private dragState:
     | { kind: 'pan'; startScreen: Point }
@@ -125,7 +167,14 @@ export class CanvasController {
       autoDensity: true,
       preference: 'webgl',
     });
+    // If destroy() ran while init() was awaiting (React StrictMode
+    // double-mount), abort: the app instance is being torn down.
+    if (this.destroyed) {
+      app.destroy(true, { children: true });
+      return;
+    }
     this.app = app;
+    this.canvasEl = app.canvas;
     this.opts.container.appendChild(app.canvas);
 
     const world = new Container({ isRenderGroup: true });
@@ -138,8 +187,11 @@ export class CanvasController {
     this.gridGraphics = new Graphics();
     this.gridLayer.addChild(this.gridGraphics);
 
-    // Four layer-kind containers in z-order: frame → media → overlay → annotation
-    for (const kind of LAYER_Z_ORDER) {
+    // Layer-kind containers in z-order. `sortByZOrder()` is the registry-
+    // driven single source of truth (replaces the hardcoded LAYER_Z_ORDER
+    // constant). When the registry changes (e.g. addLayer/deleteLayer),
+    // `rebuildLayerState` reconciles `layerContainers` with the new order.
+    for (const kind of sortByZOrder()) {
       const container = new Container();
       this.layerContainers.set(kind, container);
       world.addChild(container);
@@ -159,6 +211,13 @@ export class CanvasController {
     this.applyCamera();
     this.redrawGrid();
     this.cullViewport();
+
+    // Subscribe to layer-registry changes so addLayer/deleteLayer calls
+    // immediately reconcile the controller's derived lists and PixiJS
+    // layer containers. The unsubscribe handle is held for destroy().
+    this.unsubscribeRegistry = registerOnChange(() => {
+      this.rebuildLayerState();
+    });
 
     // Redraw grid on resize so viewport-coverage stays correct
     app.renderer.on('resize', () => {
@@ -300,8 +359,11 @@ export class CanvasController {
 
   hitTest(point: Point): ItemId | null {
     const ids = this.index.searchPoint(point);
-    // Traverse layers in reverse z-order so topmost items are picked first
-    const layerPriority: LayerKind[] = ['annotation', 'overlay', 'media', 'frame'];
+    // Traverse layers in reverse z-order (highest hit-priority first) so
+    // topmost items are picked first. The priority list is registry-driven
+    // via `sortByHitPriority()` so a new kind with a higher priority takes
+    // over immediately without code changes.
+    const layerPriority = sortByHitPriority();
     for (const kind of layerPriority) {
       for (const idStr of ids) {
         const id = asItemId(String(idStr));
@@ -330,9 +392,33 @@ export class CanvasController {
 
   // ----- Lifecycle -----
 
+  /**
+   * Track the canvas element separately so destroy() can clean it up
+   * even if init() is still pending (React StrictMode double-mount can
+   * call destroy() before init() resolves). Without this, the leaked
+   * canvas would sit in the DOM with its event listeners attached,
+   * intercepting pointerdown events meant for the new controller and
+   * making drawing appear to do nothing.
+   */
+  private canvasEl: HTMLCanvasElement | null = null;
+  private destroyed = false;
+
   destroy(): void {
+    this.destroyed = true;
     this.index.clear();
-    this.app?.destroy(true, { children: true });
+    if (this.unsubscribeRegistry) {
+      this.unsubscribeRegistry();
+      this.unsubscribeRegistry = null;
+    }
+    if (this.app) {
+      this.app.destroy(true, { children: true });
+    } else if (this.canvasEl && this.canvasEl.parentNode) {
+      // init() did not complete (StrictMode cleanup arrived during the
+      // async init window). Remove the orphan canvas so it does not sit
+      // on top of the next controller's canvas and intercept events.
+      this.canvasEl.parentNode.removeChild(this.canvasEl);
+    }
+    this.canvasEl = null;
     this.app = null;
     this.world = null;
     this.layerContainers.clear();
@@ -372,7 +458,7 @@ export class CanvasController {
           width,
           height,
           rotation: 0,
-          layerId: 'default' as never,
+          layerId: defaultLayerIdFor(layerKindFor(type)),
           attrs,
         };
         this.addItem(item);
@@ -383,11 +469,15 @@ export class CanvasController {
         this.removeItem(id);
         this.opts.onItemDelete({ id });
       },
-      queueUpdate: (_id: string, _partial: { x?: number; y?: number }) => {
-        // Single-slot buffer not needed for v1; delegate to updateItem.
+      queueUpdate: (id: string, partial: { x?: number; y?: number }) => {
+        this.queueUpdate(id, partial);
       },
       flushQueuedUpdates: () => {
-        // No-op for v1.
+        this.flushQueuedUpdates();
+      },
+      canPlace: (rect: Rect, kind: LayerKind, excludeId?: string): boolean => {
+        const itemsList = this.buildCanPlaceItems(rect, kind, excludeId as ItemId | undefined);
+        return GridService.canPlace(rect, itemsList, kind, excludeId);
       },
       setActiveTool: (name: string) => {
         this.activeToolName = name;
@@ -395,11 +485,37 @@ export class CanvasController {
     };
   }
 
+  /**
+   * Buffer a per-item coordinate update without applying it immediately.
+   * Single-slot: a subsequent call for the same item ID overwrites the
+   * previous partial. See design.md D3 (Tool-owned drag-queue state).
+   */
+  queueUpdate(id: string, partial: { x?: number; y?: number }): void {
+    const idItem = asItemId(String(id));
+    this.queuedUpdate.set(idItem, partial);
+  }
+
+  /**
+   * Apply all buffered updates via `updateItem` and clear the buffer.
+   * No-op when the buffer is empty.
+   */
+  flushQueuedUpdates(): void {
+    if (this.queuedUpdate.size === 0) return;
+    for (const [id, partial] of this.queuedUpdate) {
+      this.updateItem(id, partial);
+    }
+    this.queuedUpdate.clear();
+  }
+
   // ----- Rejection feedback -----
 
   /**
    * Draw a red outline on the given item for 200ms, then remove it.
    * Used to signal that a move/resize/create was rejected due to overlap.
+   *
+   * Bug #4: 200ms flash-and-revert UX — fixed by `invalid-placement-ux` proposal.
+   * The current behavior flashes on rejection but does not animate revert;
+   * the dedicated proposal upgrades the visual UX and adds ARIA feedback.
    */
   private flashRejection(id: ItemId): void {
     const item = this.items.get(id);
@@ -591,6 +707,76 @@ export class CanvasController {
     return GridService.snapPoint(p, this.grid);
   }
 
+  /**
+   * Reconcile the controller's derived layer state with the current
+   * registry contents. Called from the registry change subscription
+   * (see init()).
+   *
+   * - Creates a new PixiJS `Container` for any kind added at runtime
+   *   and inserts it into the world at the correct z-index.
+   * - Removes containers for kinds no longer registered (their items
+   *   would already have been removed by `deleteLayer` rules).
+   * - Refreshes `layerVisible` so newly-added kinds pick up their
+   *   registry defaults and deleted kinds are dropped.
+   *
+   * Existing items are left in place; only the container map and
+   * visibility map change. New containers start empty because
+   * `addLayer` is forbidden on non-empty layers.
+   */
+  private rebuildLayerState(): void {
+    if (!this.world) return;
+
+    const currentKinds = new Set(this.layerContainers.keys());
+    const desired = sortByZOrder();
+    const desiredSet = new Set(desired);
+
+    // Drop containers for kinds that no longer exist
+    for (const kind of currentKinds) {
+      if (!desiredSet.has(kind)) {
+        const c = this.layerContainers.get(kind);
+        if (c) {
+          c.destroy({ children: true });
+          this.layerContainers.delete(kind);
+        }
+      }
+    }
+
+    // Add containers for new kinds, inserted at the correct world index
+    // (z-order: lower zOrder = behind, higher zOrder = in front).
+    // world children order is: [grid, ...layerContainers..., selection, toolOverlay]
+    let existingCount = 0;
+    for (const kind of desired) {
+      if (this.layerContainers.has(kind)) {
+        existingCount++;
+        continue;
+      }
+      const c = new Container();
+      this.layerContainers.set(kind, c);
+      // Insert after grid (index 0) + existing layer containers.
+      this.world.addChildAt(c, 1 + existingCount);
+      existingCount++;
+    }
+
+    // Reorder existing containers to match the registry z-order
+    const world = this.world;
+    if (world) {
+      desired.forEach((kind, i) => {
+        const c = this.layerContainers.get(kind);
+        if (c) world.setChildIndex(c, 1 + i);
+      });
+    }
+
+    // Refresh visibility map from registry defaults. Existing per-kind
+    // overrides are preserved when the kind still exists.
+    const fresh = initLayerVisibility();
+    for (const [kind, value] of this.layerVisible) {
+      if (fresh.has(kind)) fresh.set(kind, value);
+    }
+    this.layerVisible = fresh;
+
+    this.cullViewport();
+  }
+
   /** Route a display object to the correct layer container based on item type. */
   private addItemToLayer(display: Container, item: BoardItem): void {
     const kind = layerKindFor(item.type);
@@ -622,6 +808,10 @@ export class CanvasController {
     canvas.addEventListener(
       'wheel',
       (e) => {
+        // Pass through browser pinch-zoom (ctrlKey) and macOS smart-zoom
+        // (metaKey) so the OS / browser handles them natively. Only
+        // intercept plain scroll-wheel events for canvas zoom.
+        if (e.ctrlKey || e.metaKey) return;
         e.preventDefault();
         const delta = -e.deltaY * 0.0015;
         const rect = canvas.getBoundingClientRect();
@@ -664,7 +854,7 @@ export class CanvasController {
             height: item.height,
           };
           const kind = layerKindFor(item.type);
-          const itemsList = this.buildCanPlaceItems();
+          const itemsList = this.buildCanPlaceItems(proposed, kind, id);
           if (!GridService.canPlace(proposed, itemsList, kind, id)) {
             this.flashRejection(id);
             continue;
@@ -699,6 +889,7 @@ export class CanvasController {
       const rect = canvas.getBoundingClientRect();
       const screenPt: Point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
       const boardPt = this.screenToBoard(screenPt);
+      this.lastPointerBoard = boardPt;
 
       if (this.spacebar) {
         this.dragState = { kind: 'pan', startScreen: screenPt };
@@ -750,7 +941,7 @@ export class CanvasController {
           height: this.grid.cellSize,
         };
         const kind = layerKindFor('rectangle');
-        const itemsList = this.buildCanPlaceItems();
+        const itemsList = this.buildCanPlaceItems(proposed, kind);
         if (!GridService.canPlace(proposed, itemsList, kind)) {
           this.flashRejectionRect(proposed);
           return;
@@ -764,7 +955,7 @@ export class CanvasController {
           width: this.grid.cellSize,
           height: this.grid.cellSize,
           rotation: 0,
-          layerId: 'default' as never,
+          layerId: defaultLayerIdFor(layerKindFor('rectangle')),
           attrs: { fillColor: '#4A90D9', strokeColor: '#000000', strokeWidth: 2 },
         };
         this.addItem(newItem);
@@ -802,6 +993,7 @@ export class CanvasController {
           const rect = canvas.getBoundingClientRect();
           const screenPt: Point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
           const boardPt = this.screenToBoard(screenPt);
+          this.lastPointerBoard = boardPt;
           const ctx = this.buildToolContext();
           const liteEvent: PointerEventLite = {
             point: boardPt,
@@ -818,6 +1010,7 @@ export class CanvasController {
 
       const rect = canvas.getBoundingClientRect();
       const screenPt: Point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      this.lastPointerBoard = this.screenToBoard(screenPt);
 
       // Resize handling
       if (this.resizeState) {
@@ -863,7 +1056,7 @@ export class CanvasController {
           this.grid,
         );
         const kind = layerKindFor(item.type);
-        const itemsList = this.buildCanPlaceItems();
+        const itemsList = this.buildCanPlaceItems(proposed, kind, rs.itemId);
 
         if (!GridService.canPlace(proposed, itemsList, kind, rs.itemId)) {
           // Revert to last valid bounds
@@ -911,14 +1104,43 @@ export class CanvasController {
         const snapped = this.snapPoint({ x, y });
         const sw = Math.max(this.grid.cellSize, Math.round(w / this.grid.cellSize) * this.grid.cellSize);
         const sh = Math.max(this.grid.cellSize, Math.round(h / this.grid.cellSize) * this.grid.cellSize);
+        const proposed = {
+          x: snapped.x,
+          y: snapped.y,
+          width: sw,
+          height: sh,
+        };
+        const drawItem = this.items.get(this.dragState.id);
+        const kind = drawItem ? layerKindFor(drawItem.type) : ('media' as LayerKind);
+        const itemsList = this.buildCanPlaceItems(proposed, kind, this.dragState.id);
+        if (!GridService.canPlace(proposed, itemsList, kind, this.dragState.id)) {
+          // Revert to last valid bounds for this draw-rect item
+          const lastValid = this.lastValidBounds.get(this.dragState.id);
+          if (lastValid && drawItem) {
+            this.updateItem(this.dragState.id, {
+              x: lastValid.x,
+              y: lastValid.y,
+              width: lastValid.width,
+              height: lastValid.height,
+            });
+          }
+          this.flashRejection(this.dragState.id);
+          return;
+        }
         this.updateItem(this.dragState.id, { x: snapped.x, y: snapped.y, width: sw, height: sh });
+        // Track last valid bounds on acceptance
+        this.lastValidBounds.set(this.dragState.id, {
+          x: snapped.x,
+          y: snapped.y,
+          width: sw,
+          height: sh,
+        });
         return;
       }
 
       if (this.dragState.kind === 'move-selected') {
         const dx = boardPt.x - this.dragState.startBoard.x;
         const dy = boardPt.y - this.dragState.startBoard.y;
-        const itemsList = this.buildCanPlaceItems();
 
         for (const [id, start] of this.dragState.startPositions) {
           const item = this.items.get(id);
@@ -928,6 +1150,7 @@ export class CanvasController {
             this.grid,
           );
           const kind = layerKindFor(item.type);
+          const itemsList = this.buildCanPlaceItems(proposed, kind, id);
 
           if (!GridService.canPlace(proposed, itemsList, kind, id)) {
             // Revert to last valid bounds
@@ -996,17 +1219,17 @@ export class CanvasController {
       }
       this.dragState = null;
 
+      // Commit any per-item queued updates (single-slot buffer from
+      // Tool-owned drag-queue, see design.md D3) before notifying the tool
+      // that the pointer is up, so queued updates are committed first.
+      this.flushQueuedUpdates();
+
       // Notify tool of pointer up
       const tool = this.toolRegistry.get(this.activeToolName);
       if (tool && tool.onPointerUp) {
-        const rect2 = canvas.getBoundingClientRect();
-        const boardPt2 = this.screenToBoard({
-          x: 0, // pointer position not available in endDrag; tools track their own state
-          y: 0,
-        });
         const ctx = this.buildToolContext();
         const liteEvent: PointerEventLite = {
-          point: boardPt2,
+          point: this.lastPointerBoard,
           buttons: 0,
           shiftKey: false,
           metaKey: false,
@@ -1024,10 +1247,19 @@ export class CanvasController {
   }
 
   /**
-   * Build a list of items suitable for GridService.canPlace().
-   * Each entry has id, x, y, width, height, and layerKind.
+   * Build a list of items suitable for GridService.canPlace(), scoped to the
+   * given rect and layer kind via SpatialIndex.findOverlapping (O(log n + k)
+   * via RBush). The dragged/resized item should be passed as `excludeId` so
+   * it is not compared against itself.
+   *
+   * Each entry has id, x, y, width, height, and layerKind — the shape
+   * GridService.canPlace expects.
    */
-  private buildCanPlaceItems(): Array<{
+  private buildCanPlaceItems(
+    rect: Rect,
+    kind: LayerKind,
+    excludeId?: ItemId,
+  ): Array<{
     id: string;
     x: number;
     y: number;
@@ -1035,6 +1267,7 @@ export class CanvasController {
     height: number;
     layerKind: LayerKind;
   }> {
+    const candidates = this.index.findOverlapping(rect, kind, excludeId);
     const result: Array<{
       id: string;
       x: number;
@@ -1043,14 +1276,16 @@ export class CanvasController {
       height: number;
       layerKind: LayerKind;
     }> = [];
-    for (const [id, item] of this.items) {
+    for (const entry of candidates) {
+      const item = this.items.get(entry.id);
+      if (!item) continue;
       result.push({
-        id,
+        id: entry.id,
         x: item.x,
         y: item.y,
         width: item.width,
         height: item.height,
-        layerKind: layerKindFor(item.type),
+        layerKind: entry.layerKind,
       });
     }
     return result;
@@ -1096,14 +1331,14 @@ export function pickLayerKind(type: ItemType): LayerKind {
 
 /**
  * Given a set of candidate item IDs and a function to look up their LayerKind,
- * return the topmost item ID according to z-order (annotation > overlay >
- * media > frame). Returns null if no candidates match.
+ * return the topmost item ID according to registry-driven hit-priority
+ * (highest first). Returns null if no candidates match.
  */
 export function pickTopmostItem(
   ids: Iterable<string>,
   getKind: (id: string) => LayerKind | undefined,
 ): string | null {
-  const layerPriority: LayerKind[] = ['annotation', 'overlay', 'media', 'frame'];
+  const layerPriority = sortByHitPriority();
   const idSet = new Set(ids);
   for (const kind of layerPriority) {
     for (const id of idSet) {
