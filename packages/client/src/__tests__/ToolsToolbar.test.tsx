@@ -1,22 +1,29 @@
 /**
- * Toolbar integration tests — universal row + mode-scoped row (Tasks 14.1-14.4, 14.11).
+ * ToolsToolbar integration tests — universal row + mode-scoped row.
+ *
+ * Migrated from the legacy `Toolbar.test.tsx` after deletion of the
+ * duplicate `Toolbar.tsx` component (see openspec change
+ * `frontend-modularity-phase1-dead-code`). This file covers the
+ * ship-target `ToolsToolbar` rendered by `BoardPage`. Cases that
+ * targeted the dead `Toolbar.tsx`'s hidden `<span>` artifacts and its
+ * legacy mode-toggle button are dropped — those affordances no longer
+ * exist.
  *
  * Uses React Testing Library with happy-dom environment.
- * The Toolbar now reads from the ToolDefinition registry, so we must
- * populate it before each test and reset it after.
+ * The toolbar reads from the ToolDefinition registry, so the registry
+ * must be populated before each test and reset after.
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { render, screen, fireEvent, cleanup } from '@testing-library/react';
 import { useUIStore } from '../state/uiStore';
 import {
   populateDefaultToolRegistry,
   _resetToolRegistryForTests,
 } from '../canvas/tools';
-import type { ToolbarAction } from '../ui/Toolbar';
-import { Toolbar } from '../ui/Toolbar';
+import { ToolsToolbar, type ToolToolbarAction } from '../ui/ToolsToolbar';
 
-describe('Toolbar — universal row + mode-scoped row', () => {
-  let actions: ToolbarAction[] = [];
+describe('ToolsToolbar — universal row + mode-scoped row', () => {
+  let actions: ToolToolbarAction[] = [];
 
   beforeEach(() => {
     actions = [];
@@ -34,53 +41,45 @@ describe('Toolbar — universal row + mode-scoped row', () => {
     _resetToolRegistryForTests();
   });
 
-  function renderToolbar() {
+  function renderToolsToolbar() {
     return render(
-      <Toolbar
+      <ToolsToolbar
         onAction={(a) => actions.push(a)}
-        connected={true}
-        role="owner"
       />,
     );
   }
 
   // -----------------------------------------------------------------------
-  // 14.1 — Universal row in grid mode
+  // Universal row in every mode
   // -----------------------------------------------------------------------
-  it('14.1: shows universal row (Select/Move/Hand) in grid mode', () => {
-    renderToolbar();
+  it('shows universal row (Select/Move/Hand) in grid mode', () => {
+    renderToolsToolbar();
     expect(screen.getByLabelText('Select tool')).toBeDefined();
     expect(screen.getByLabelText('Move tool')).toBeDefined();
     expect(screen.getByLabelText('Hand tool')).toBeDefined();
   });
 
-  // -----------------------------------------------------------------------
-  // 14.2 — Universal row in annotation mode
-  // -----------------------------------------------------------------------
-  it('14.2: shows universal row (Select/Move/Hand) in annotation mode', () => {
+  it('shows universal row (Select/Move/Hand) in annotation mode', () => {
     useUIStore.getState().setInteractionMode('annotation');
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Select tool')).toBeDefined();
     expect(screen.getByLabelText('Move tool')).toBeDefined();
     expect(screen.getByLabelText('Hand tool')).toBeDefined();
   });
 
-  // -----------------------------------------------------------------------
-  // 14.3 — Universal row in connector mode
-  // -----------------------------------------------------------------------
-  it('14.3: shows universal row (Select/Move/Hand) in connector mode', () => {
+  it('shows universal row (Select/Move/Hand) in connector mode', () => {
     useUIStore.getState().setInteractionMode('connector');
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Select tool')).toBeDefined();
     expect(screen.getByLabelText('Move tool')).toBeDefined();
     expect(screen.getByLabelText('Hand tool')).toBeDefined();
   });
 
   // -----------------------------------------------------------------------
-  // 14.4 — Mode-scoped row changes when switching grid → annotation
+  // Mode-scoped row changes when switching grid → annotation
   // -----------------------------------------------------------------------
-  it('14.4: mode-scoped row changes when switching from grid to annotation', () => {
-    renderToolbar();
+  it('mode-scoped row changes when switching from grid to annotation', () => {
+    renderToolsToolbar();
 
     // Grid mode: Rectangle present, Freehand absent
     expect(screen.getByLabelText('Rectangle tool')).toBeDefined();
@@ -89,7 +88,7 @@ describe('Toolbar — universal row + mode-scoped row', () => {
     // Switch to annotation mode
     cleanup();
     useUIStore.getState().setInteractionMode('annotation');
-    renderToolbar();
+    renderToolsToolbar();
 
     // Annotation mode: Freehand present, Frame absent
     expect(screen.getByLabelText('Freehand tool')).toBeDefined();
@@ -100,7 +99,7 @@ describe('Toolbar — universal row + mode-scoped row', () => {
   // Grid mode mode-scoped row contents
   // -----------------------------------------------------------------------
   it('grid mode shows Rectangle, Frame, Image, Text in mode-scoped row', () => {
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Rectangle tool')).toBeDefined();
     expect(screen.getByLabelText('Frame tool')).toBeDefined();
     expect(screen.getByLabelText('Image tool')).toBeDefined();
@@ -114,7 +113,7 @@ describe('Toolbar — universal row + mode-scoped row', () => {
   // -----------------------------------------------------------------------
   it('annotation mode shows Freehand, Arrow, Rectangle, Text, Eraser in mode-scoped row', () => {
     useUIStore.getState().setInteractionMode('annotation');
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Freehand tool')).toBeDefined();
     expect(screen.getByLabelText('Arrow tool')).toBeDefined();
     expect(screen.getByLabelText('Rectangle tool')).toBeDefined();
@@ -130,7 +129,7 @@ describe('Toolbar — universal row + mode-scoped row', () => {
   // -----------------------------------------------------------------------
   it('connector mode shows Connector in mode-scoped row', () => {
     useUIStore.getState().setInteractionMode('connector');
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Connector tool')).toBeDefined();
     // Grid/annotation tools should NOT be visible
     expect(screen.queryByLabelText('Rectangle tool')).toBeNull();
@@ -141,92 +140,59 @@ describe('Toolbar — universal row + mode-scoped row', () => {
   // Delete button visible in all modes
   // -----------------------------------------------------------------------
   it('Delete button is visible in all modes', () => {
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Delete selection')).toBeDefined();
 
     cleanup();
     useUIStore.getState().setInteractionMode('annotation');
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Delete selection')).toBeDefined();
 
     cleanup();
     useUIStore.getState().setInteractionMode('connector');
-    renderToolbar();
+    renderToolsToolbar();
     expect(screen.getByLabelText('Delete selection')).toBeDefined();
   });
 
   // -----------------------------------------------------------------------
-  // Mode toggle — grid → annotation
+  // Click on a tool emits a set-tool action and updates active tool
   // -----------------------------------------------------------------------
-  it('clicking mode toggle switches from grid to annotation', () => {
-    renderToolbar();
-    const toggle = screen.getByLabelText('Toggle interaction mode');
-    expect(toggle.textContent).toContain('Grid');
+  it('clicking a tool button emits set-tool action and updates the active tool', () => {
+    renderToolsToolbar();
+    const move = screen.getByLabelText('Move tool');
+    fireEvent.click(move);
 
-    fireEvent.click(toggle);
+    expect(useUIStore.getState().activeTool).toBe('move');
+    expect(actions).toContainEqual({ type: 'set-tool', tool: 'move' });
+  });
 
-    expect(useUIStore.getState().interactionMode).toBe('annotation');
-    expect(actions).toContainEqual({ type: 'set-mode', mode: 'annotation' });
+  it('clicking Delete emits a delete-selected action', () => {
+    renderToolsToolbar();
+    fireEvent.click(screen.getByLabelText('Delete selection'));
+    expect(actions).toContainEqual({ type: 'delete-selected' });
   });
 
   // -----------------------------------------------------------------------
-  // Mode toggle — annotation → connector
+  // aria-pressed reflects the active tool
   // -----------------------------------------------------------------------
-  it('clicking mode toggle switches from annotation to connector', () => {
+  it('marks the active tool button with aria-pressed=true', () => {
+    useUIStore.getState().setActiveTool('rectangle');
+    renderToolsToolbar();
+    expect(screen.getByLabelText('Rectangle tool').getAttribute('aria-pressed')).toBe('true');
+    // A non-active universal tool should be aria-pressed=false
+    expect(screen.getByLabelText('Select tool').getAttribute('aria-pressed')).toBe('false');
+  });
+
+  // -----------------------------------------------------------------------
+  // Click on a mode-scoped tool works the same as a universal tool
+  // -----------------------------------------------------------------------
+  it('clicking a mode-scoped tool emits set-tool and updates the active tool', () => {
     useUIStore.getState().setInteractionMode('annotation');
-    renderToolbar();
-    const toggle = screen.getByLabelText('Toggle interaction mode');
-    expect(toggle.textContent).toContain('Annotation');
+    renderToolsToolbar();
+    const freehand = screen.getByLabelText('Freehand tool');
+    fireEvent.click(freehand);
 
-    fireEvent.click(toggle);
-
-    expect(useUIStore.getState().interactionMode).toBe('connector');
-    expect(actions).toContainEqual({ type: 'set-mode', mode: 'connector' });
-  });
-
-  // -----------------------------------------------------------------------
-  // 14.11 — Mode toggle cycles through all 3 modes and wraps
-  // -----------------------------------------------------------------------
-  it('14.11: mode toggle cycles through all 3 modes and wraps around', () => {
-    renderToolbar();
-    const toggle = screen.getByLabelText('Toggle interaction mode');
-
-    // Start: grid
-    expect(useUIStore.getState().interactionMode).toBe('grid');
-
-    // Click 1: grid → annotation
-    fireEvent.click(toggle);
-    expect(useUIStore.getState().interactionMode).toBe('annotation');
-
-    // Click 2: annotation → connector
-    fireEvent.click(toggle);
-    expect(useUIStore.getState().interactionMode).toBe('connector');
-
-    // Click 3: connector → grid (wraps)
-    fireEvent.click(toggle);
-    expect(useUIStore.getState().interactionMode).toBe('grid');
-
-    // All three set-mode actions emitted
-    expect(actions).toContainEqual({ type: 'set-mode', mode: 'annotation' });
-    expect(actions).toContainEqual({ type: 'set-mode', mode: 'connector' });
-    expect(actions).toContainEqual({ type: 'set-mode', mode: 'grid' });
-  });
-
-  // -----------------------------------------------------------------------
-  // Mode toggle emits set-mode action
-  // -----------------------------------------------------------------------
-  it('mode toggle emits set-mode action', () => {
-    renderToolbar();
-    fireEvent.click(screen.getByLabelText('Toggle interaction mode'));
-    expect(actions.length).toBeGreaterThanOrEqual(1);
-    expect(actions[0]!.type).toBe('set-mode');
-  });
-
-  // -----------------------------------------------------------------------
-  // Renders mode toggle button
-  // -----------------------------------------------------------------------
-  it('renders mode toggle button', () => {
-    renderToolbar();
-    expect(screen.getByLabelText('Toggle interaction mode')).toBeDefined();
+    expect(useUIStore.getState().activeTool).toBe('freehand');
+    expect(actions).toContainEqual({ type: 'set-tool', tool: 'freehand' });
   });
 });
