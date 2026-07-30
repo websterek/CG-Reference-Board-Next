@@ -31,6 +31,8 @@ import { render, cleanup, act } from '@testing-library/react';
 const controllerMock = {
   subscribeMinimap: vi.fn(),
   getMinimapSnapshot: vi.fn(),
+  subscribeContextMenu: vi.fn(() => () => {}),
+  closeContextMenu: vi.fn(),
   // Unused by BoardPage but referenced in cleanup / typing:
   applyToolbarAction: vi.fn(),
   applyRemoteUpdate: vi.fn(),

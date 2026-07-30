@@ -51,6 +51,7 @@ export {
   ImageAttrsSchema,
   isImageItem,
   DEFAULT_IMAGE_SIZE,
+  defaultImageSize,
 } from './items/image';
 export { resolveAnchor } from './items/connector';
 export type { ItemTypeDefinition } from './items/index';

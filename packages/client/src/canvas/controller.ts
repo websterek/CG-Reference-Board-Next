@@ -44,6 +44,8 @@ import { renderImage } from './renderers/image';
 import { renderFrame } from './renderers/frame';
 import { renderAnnotation } from './renderers/annotation';
 import { renderConnector } from './renderers/connector';
+import { readPastedImage, uploadImageFromBlob } from '../media/paste-image';
+import { defaultImageSize } from '@gridboard/domain';
 import {
   populateDefaultToolRegistry,
   getAllTools,
@@ -66,6 +68,27 @@ export interface CanvasControllerOptions {
   onItemChange: (update: { id: string; partial: Partial<BoardItem> }) => void;
   onItemDelete: (del: { id: string }) => void;
   onItemCreate: (add: { item: BoardItem }) => void;
+  /**
+   * Board id, used by the paste flow to upload to the right board.
+   * Required for paste to work; paste will throw if missing.
+   */
+  boardId?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Context menu types (paste-image-with-cover-fit D7)
+// ---------------------------------------------------------------------------
+
+export type ContextMenuItem =
+  | { kind: 'action'; label: string; onClick: () => void; shortcut?: string }
+  | { kind: 'submenu'; label: string; items: ContextMenuItem[] }
+  | { kind: 'divider' }
+  | { kind: 'info'; text: string };
+
+export interface ContextMenuState {
+  /** Screen-space anchor (clientX, clientY from the contextmenu event). */
+  anchor: { x: number; y: number };
+  items: ContextMenuItem[];
 }
 
 /**
@@ -306,6 +329,7 @@ export class CanvasController {
     this.world = world;
     this.initToolRegistry();
     this.installInputHandlers();
+    this.installContextMenuHandler();
     // Initial paint runs synchronously so the canvas isn't blank
     // before the first frame.
     this.applyCamera();
@@ -485,6 +509,11 @@ export class CanvasController {
       this.unindexConnector(idItem, item);
     }
     this.items.delete(idItem);
+    // Release per-item backfill tracking so a re-added item id
+    // (e.g. after a delete + re-paste at the same UUID — rare) can
+    // backfill again. Bounded by the number of distinct image item
+    // ids the user has ever seen, so it does not grow unboundedly.
+    this.backfilledNaturalDims.delete(idItem);
     const display = this.displayById.get(idItem);
     if (display && item) {
       const kind = layerKindFor(item.type);
@@ -971,6 +1000,220 @@ export class CanvasController {
     this.ghostGraphics.clear();
     this.placementStates.clear();
     this.selectionLayer = null;
+  }
+
+  // ----- Context menu (paste-image-with-cover-fit D7) -----
+
+  /**
+   * Listeners for context menu state. The React ContextMenu component
+   * subscribes here so opening / closing the menu is driven by the
+   * controller (the contextmenu listener installed below).
+   */
+  private contextMenuListeners = new Set<(menu: ContextMenuState | null) => void>();
+  private lastEmittedContextMenu: ContextMenuState | null = null;
+
+  /**
+   * Open the context menu at the given screen-space anchor with the
+   * given items. The React tree re-renders via `subscribeContextMenu`.
+   */
+  openContextMenu(anchor: { x: number; y: number }, items: ContextMenuItem[]): void {
+    const state: ContextMenuState = { anchor, items };
+    this.lastEmittedContextMenu = state;
+    for (const listener of this.contextMenuListeners) listener(state);
+  }
+
+  /**
+   * Close the context menu. Called when the user clicks outside,
+   * presses Escape, scrolls, or selects a menu item.
+   */
+  closeContextMenu(): void {
+    if (this.lastEmittedContextMenu === null) return;
+    this.lastEmittedContextMenu = null;
+    for (const listener of this.contextMenuListeners) listener(null);
+  }
+
+  /**
+   * Subscribe to context menu state. Returns an unsubscribe function.
+   * Same pattern as `subscribeMinimap`.
+   */
+  subscribeContextMenu(listener: (menu: ContextMenuState | null) => void): () => void {
+    this.contextMenuListeners.add(listener);
+    queueMicrotask(() => {
+      if (this.contextMenuListeners.has(listener)) {
+        listener(this.lastEmittedContextMenu);
+      }
+    });
+    return () => {
+      this.contextMenuListeners.delete(listener);
+    };
+  }
+
+  /**
+   * Build the context menu items for a given board-coordinate hit. The
+   * controller decides what entries to show based on the item under
+   * the cursor (or no item → global menu).
+   */
+  buildContextMenuItems(hitItem: BoardItem | null): ContextMenuItem[] {
+    const pasteImage: ContextMenuItem = {
+      kind: 'action',
+      label: 'Paste image',
+      shortcut: 'Ctrl+V',
+      onClick: () => {
+        void this.pasteImageFromClipboard();
+      },
+    };
+    if (!hitItem) {
+      return [
+        pasteImage,
+        { kind: 'divider' },
+        {
+          kind: 'submenu',
+          label: 'View',
+          items: [
+            { kind: 'action', label: 'Zoom in', onClick: () => this.setZoom(this.camera.zoom * 1.2) },
+            { kind: 'action', label: 'Zoom out', onClick: () => this.setZoom(this.camera.zoom / 1.2) },
+            { kind: 'action', label: 'Fit to content', onClick: () => this.fitToContent() },
+            { kind: 'action', label: 'Reset view', onClick: () => this.resetView() },
+          ],
+        },
+      ];
+    }
+    const deleteItem: ContextMenuItem = {
+      kind: 'action',
+      label: 'Delete',
+      onClick: () => {
+        this.removeItem(hitItem.id);
+        this.opts.onItemDelete({ id: hitItem.id });
+      },
+    };
+    if (hitItem.type === 'image') {
+      const attrs = hitItem.attrs as { naturalWidth?: number; naturalHeight?: number };
+      const natW = attrs.naturalWidth ?? hitItem.width;
+      const natH = attrs.naturalHeight ?? hitItem.height;
+      return [
+        {
+          kind: 'submenu',
+          label: 'Size',
+          items: [1, 2, 3, 4, 6, 8].map((n) => ({
+            kind: 'action' as const,
+            label: `${n}×`,
+            onClick: () => this.resizeImageToFactor(hitItem.id, n),
+          })),
+        },
+        { kind: 'divider' },
+        pasteImage,
+        deleteItem,
+        { kind: 'divider' },
+        { kind: 'info', text: `${natW} × ${natH}` },
+      ];
+    }
+    return [pasteImage, deleteItem];
+  }
+
+  /**
+   * Resize an image item to N× the cellSize, preserving the natural
+   * aspect via the D2 default-size rule. Position is anchored at the
+   * item's top-left so the user can place the item first and grow it
+   * from the menu.
+   */
+  resizeImageToFactor(id: string, factor: number): void {
+    const idItem = asItemId(String(id));
+    const item = this.items.get(idItem);
+    if (!item || item.type !== 'image') return;
+    const attrs = item.attrs as { naturalWidth?: number; naturalHeight?: number };
+    if (typeof attrs.naturalWidth !== 'number' || typeof attrs.naturalHeight !== 'number') {
+      return;
+    }
+    const size = defaultImageSize(attrs.naturalWidth, attrs.naturalHeight, this.grid.cellSize * factor);
+    const kind = layerKindFor(item.type);
+    const proposed = { x: item.x, y: item.y, width: size.width, height: size.height };
+    const itemsList = this.buildCanPlaceItems(proposed, kind, idItem);
+    if (!GridService.canPlace(proposed, itemsList, kind, idItem)) return;
+    this.updateItem(idItem, proposed);
+    this.opts.onItemChange({ id: idItem, partial: proposed });
+    this.lastValidBounds.set(idItem, proposed);
+  }
+
+  // ----- Paste flow (paste-image-with-cover-fit D5) -----
+
+  /**
+   * Optional error callback wired by BoardPage. Errors thrown by the
+   * paste flow (decode failure, upload failure) are reported here so
+   * the React layer can show a toast notification.
+   */
+  onPasteError?: (error: Error) => void;
+
+  /**
+   * Paste an image from the system clipboard. Reads the clipboard
+   * (via `readPastedImage`), probes natural dimensions, uploads to
+   * the server, and creates an image item at `lastPointerBoard` using
+   * the D2 default-size rule. Errors are routed to `onPasteError`
+   * (set by the React layer) instead of thrown.
+   */
+  async pasteImageFromClipboard(event?: ClipboardEvent | null): Promise<void> {
+    try {
+      const pasted = await readPastedImage(event ?? null);
+      if (!pasted) return; // no image in clipboard → no-op
+      const boardId = this.opts.boardId;
+      if (!boardId) throw new Error('cannot paste: no board id available on controller');
+      const ext = pasted.mimeType.split('/')[1] ?? 'png';
+      const asset = await uploadImageFromBlob(boardId, pasted.file, `pasted.${ext}`);
+      const cellSize = this.grid.cellSize;
+      const { width, height } = defaultImageSize(pasted.naturalWidth, pasted.naturalHeight, cellSize);
+      const snapped = GridService.snapPoint(this.lastPointerBoard, this.grid);
+      const item: BoardItem = {
+        id: asItemId(crypto.randomUUID()),
+        type: 'image',
+        x: snapped.x,
+        y: snapped.y,
+        width,
+        height,
+        rotation: 0,
+        layerId: defaultLayerIdFor(layerKindFor('image')),
+        attrs: {
+          assetId: asset.assetId,
+          mimeType: pasted.mimeType,
+          status: 'loading',
+          naturalWidth: pasted.naturalWidth,
+          naturalHeight: pasted.naturalHeight,
+        },
+      };
+      this.addItem(item);
+      this.opts.onItemCreate({ item });
+    } catch (err) {
+      if (this.onPasteError) {
+        this.onPasteError(err instanceof Error ? err : new Error(String(err)));
+      }
+    }
+  }
+
+  /**
+   * Install a `contextmenu` listener on the canvas. Right-click opens
+   * the floating context menu; the browser's default menu is
+   * suppressed. The handler converts the screen-space position to
+   * board coords for hit-testing and to screen coords for the menu
+   * anchor.
+   */
+  private installContextMenuHandler(): void {
+    if (!this.app) return;
+    const canvas = this.app.canvas;
+    canvas.addEventListener('contextmenu', (e: MouseEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const screenPt: Point = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const boardPt = this.screenToBoard(screenPt);
+      this.lastPointerBoard = boardPt;
+      const hitId = this.hitTest(boardPt);
+      const hitItem: BoardItem | null = hitId ? this.items.get(hitId) ?? null : null;
+      // If the user right-clicks an unselected item, select it so the
+      // menu actions operate on a known item.
+      if (hitItem && !this.selection.has(hitItem.id)) {
+        this.selection = new Set([hitItem.id]);
+        this.renderSelection();
+      }
+      const items = this.buildContextMenuItems(hitItem);
+      this.openContextMenu({ x: e.clientX, y: e.clientY }, items);
+    });
   }
 
   // ----- Tool registry -----
@@ -1626,11 +1869,41 @@ export class CanvasController {
     }
   }
 
+  /**
+   * Per-item backfill state — tracks whether the natural dimensions
+   * for an image item have already been emitted to the Yjs adapter.
+   * Prevents the backfill from firing on every render frame after the
+   * first correction (paste-image-with-cover-fit D6).
+   */
+  private backfilledNaturalDims = new Set<ItemId>();
+
   /** Create the appropriate PixiJS display object for an item. */
   private renderItemDisplay(item: BoardItem): Container {
     switch (item.type) {
       case 'image':
-        return renderImage(item);
+        return renderImage(item, {
+          // D6 legacy fallback: when the texture loads with different
+          // natural dimensions than the stored attrs, emit an update
+          // back to the Yjs adapter so subsequent renders use the
+          // real values. We track the backfill per-item in
+          // `backfilledNaturalDims` so the emit happens exactly once
+          // per item; otherwise the renderer would fire on every
+          // re-render and create a feedback loop.
+          onBackfill: (dims) => {
+            if (this.backfilledNaturalDims.has(item.id)) return;
+            this.backfilledNaturalDims.add(item.id);
+            const nextAttrs = {
+              ...(item.attrs as Record<string, unknown>),
+              naturalWidth: dims.naturalWidth,
+              naturalHeight: dims.naturalHeight,
+            };
+            this.updateItem(item.id, { attrs: nextAttrs });
+            this.opts.onItemChange({
+              id: item.id,
+              partial: { attrs: nextAttrs as never },
+            });
+          },
+        });
       case 'frame':
         return renderFrame(item, { grid: this.grid });
       case 'annotation-stroke':
@@ -1997,42 +2270,70 @@ export class CanvasController {
         const item = this.items.get(rs.itemId);
         if (!item) return;
 
-        const dx = boardPt.x - rs.startBoard.x;
-        const dy = boardPt.y - rs.startBoard.y;
+        let proposed: Rect;
 
-        let newX = rs.startBounds.x;
-        let newY = rs.startBounds.y;
-        let newW = rs.startBounds.width;
-        let newH = rs.startBounds.height;
+        // Aspect-locked branch (paste-image-with-cover-fit D4): image
+        // items must always preserve their natural aspect ratio. The
+        // dominant drag axis drives the long dimension; the short
+        // dimension follows from the natural aspect. The opposite
+        // corner is anchored. Non-image items keep the existing
+        // free-aspect behavior (regression guard, task 3.4).
+        const attrs = item.attrs as { naturalWidth?: number; naturalHeight?: number } | undefined;
+        if (
+          item.type === 'image' &&
+          attrs &&
+          typeof attrs.naturalWidth === 'number' &&
+          typeof attrs.naturalHeight === 'number' &&
+          attrs.naturalWidth > 0 &&
+          attrs.naturalHeight > 0
+        ) {
+          proposed = aspectLockedResize(
+            rs.startBounds,
+            attrs.naturalWidth,
+            attrs.naturalHeight,
+            rs.corner,
+            boardPt,
+            this.grid.cellSize,
+          );
+        } else {
+          const dx = boardPt.x - rs.startBoard.x;
+          const dy = boardPt.y - rs.startBoard.y;
 
-        switch (rs.corner) {
-          case 'br':
-            newW = Math.max(this.grid.cellSize, rs.startBounds.width + dx);
-            newH = Math.max(this.grid.cellSize, rs.startBounds.height + dy);
-            break;
-          case 'bl':
-            newX = rs.startBounds.x + dx;
-            newW = Math.max(this.grid.cellSize, rs.startBounds.width - dx);
-            newH = Math.max(this.grid.cellSize, rs.startBounds.height + dy);
-            break;
-          case 'tr':
-            newY = rs.startBounds.y + dy;
-            newW = Math.max(this.grid.cellSize, rs.startBounds.width + dx);
-            newH = Math.max(this.grid.cellSize, rs.startBounds.height - dy);
-            break;
-          case 'tl':
-            newX = rs.startBounds.x + dx;
-            newY = rs.startBounds.y + dy;
-            newW = Math.max(this.grid.cellSize, rs.startBounds.width - dx);
-            newH = Math.max(this.grid.cellSize, rs.startBounds.height - dy);
-            break;
+          let newX = rs.startBounds.x;
+          let newY = rs.startBounds.y;
+          let newW = rs.startBounds.width;
+          let newH = rs.startBounds.height;
+
+          switch (rs.corner) {
+            case 'br':
+              newW = Math.max(this.grid.cellSize, rs.startBounds.width + dx);
+              newH = Math.max(this.grid.cellSize, rs.startBounds.height + dy);
+              break;
+            case 'bl':
+              newX = rs.startBounds.x + dx;
+              newW = Math.max(this.grid.cellSize, rs.startBounds.width - dx);
+              newH = Math.max(this.grid.cellSize, rs.startBounds.height + dy);
+              break;
+            case 'tr':
+              newY = rs.startBounds.y + dy;
+              newW = Math.max(this.grid.cellSize, rs.startBounds.width + dx);
+              newH = Math.max(this.grid.cellSize, rs.startBounds.height - dy);
+              break;
+            case 'tl':
+              newX = rs.startBounds.x + dx;
+              newY = rs.startBounds.y + dy;
+              newW = Math.max(this.grid.cellSize, rs.startBounds.width - dx);
+              newH = Math.max(this.grid.cellSize, rs.startBounds.height - dy);
+              break;
+          }
+
+          // Quantize
+          proposed = GridService.quantizeRect(
+            { x: newX, y: newY, width: newW, height: newH },
+            this.grid,
+          );
         }
 
-        // Quantize
-        const proposed = GridService.quantizeRect(
-          { x: newX, y: newY, width: newW, height: newH },
-          this.grid,
-        );
         const kind = layerKindFor(item.type);
         const itemsList = this.buildCanPlaceItems(proposed, kind, rs.itemId);
         const placeable = GridService.canPlace(proposed, itemsList, kind, rs.itemId);
@@ -2605,4 +2906,139 @@ export function validateCreate(
     return { valid: true, corrected: quantized };
   }
   return { valid: false };
+}
+
+// ---------------------------------------------------------------------------
+// Aspect-locked resize (paste-image-with-cover-fit D4)
+// ---------------------------------------------------------------------------
+
+/**
+ * Compute a strictly aspect-locked resize of a rect, given the dragged
+ * corner, the current pointer position, and the image's natural aspect.
+ *
+ * Rules (D4):
+ *   - The dominant axis (larger |delta|) drives the long dimension.
+ *   - The short dimension is computed from the natural aspect.
+ *   - Both dimensions are snapped to the next cellSize multiple
+ *     (ceil) and floored at cellSize.
+ *   - The opposite corner stays anchored: the rect's position is
+ *     derived from the fixed corner so it does not move.
+ *
+ * Pure helper, exported for unit testing without PixiJS.
+ */
+export function aspectLockedResize(
+  startBounds: Rect,
+  naturalW: number,
+  naturalH: number,
+  corner: 'tl' | 'tr' | 'bl' | 'br',
+  pointer: Point,
+  cellSize: number,
+): Rect {
+  if (naturalW <= 0 || naturalH <= 0 || cellSize <= 0) {
+    return { ...startBounds };
+  }
+  const aspect = naturalW / naturalH;
+
+  // Fixed (anchored) corner coordinates, derived from the corner
+  // the user is NOT dragging.
+  let fixedX: number;
+  let fixedY: number;
+  switch (corner) {
+    case 'br':
+      fixedX = startBounds.x;
+      fixedY = startBounds.y;
+      break;
+    case 'bl':
+      fixedX = startBounds.x + startBounds.width;
+      fixedY = startBounds.y;
+      break;
+    case 'tr':
+      fixedX = startBounds.x;
+      fixedY = startBounds.y + startBounds.height;
+      break;
+    case 'tl':
+      fixedX = startBounds.x + startBounds.width;
+      fixedY = startBounds.y + startBounds.height;
+      break;
+  }
+
+  // Raw deltas from the fixed corner to the pointer.
+  const rawDx = Math.abs(pointer.x - fixedX);
+  const rawDy = Math.abs(pointer.y - fixedY);
+  const dominantIsX = rawDx >= rawDy;
+
+  // Long dimension from the dominant axis, snapped UP to the next
+  // cellSize multiple (ceil). This guarantees the rect always covers
+  // at least the dragged distance, per the design.
+  const ceilToCell = (v: number): number => {
+    const n = Math.ceil(v / cellSize);
+    return Math.max(1, n) * cellSize;
+  };
+
+  // Short dimension from the natural aspect. We compute BOTH
+  // possibilities (long-is-width and long-is-height) and pick the
+  // one consistent with the dominant axis so the math is symmetric
+  // for landscape and portrait images.
+  let width: number;
+  let height: number;
+  if (dominantIsX) {
+    // Width is the long side.
+    width = ceilToCell(rawDx);
+    if (aspect >= 1) {
+      // Landscape: short side = long side / aspect.
+      height = ceilToCell(width / aspect);
+    } else {
+      // Portrait: long side is height (from aspect), width = height * aspect.
+      height = ceilToCell(width / aspect);
+      width = ceilToCell(height * aspect);
+    }
+    // Keep aspect exact: re-derive width from height.
+    if (aspect >= 1) {
+      width = ceilToCell(height * aspect);
+    } else {
+      // long side is width
+      width = ceilToCell(height * aspect);
+    }
+  } else {
+    // Height is the long side.
+    height = ceilToCell(rawDy);
+    if (aspect >= 1) {
+      // Landscape: long side is width.
+      width = ceilToCell(height * aspect);
+    } else {
+      // Portrait: short side = long side * aspect.
+      width = ceilToCell(height * aspect);
+    }
+  }
+
+  // Floor at one cell.
+  width = Math.max(cellSize, width);
+  height = Math.max(cellSize, height);
+
+  // Position the rect so the fixed corner is anchored.
+  let x: number;
+  let y: number;
+  switch (corner) {
+    case 'br':
+      // Fixed corner is the top-left; new rect = (fixedX, fixedY, w, h)
+      x = fixedX;
+      y = fixedY;
+      break;
+    case 'bl':
+      // Fixed corner is the top-right; new rect = (fixedX - w, fixedY, w, h)
+      x = fixedX - width;
+      y = fixedY;
+      break;
+    case 'tr':
+      // Fixed corner is the bottom-left; new rect = (fixedX, fixedY - h, w, h)
+      x = fixedX;
+      y = fixedY - height;
+      break;
+    case 'tl':
+      // Fixed corner is the bottom-right; new rect = (fixedX - w, fixedY - h, w, h)
+      x = fixedX - width;
+      y = fixedY - height;
+      break;
+  }
+  return { x, y, width, height };
 }

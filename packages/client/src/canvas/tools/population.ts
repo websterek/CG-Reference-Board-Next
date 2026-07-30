@@ -20,6 +20,7 @@ import { FrameCreateTool } from './frame-tool';
 import { AnnotationFreehandTool } from './annotation-tool';
 import { HandTool } from './hand-tool';
 import { ConnectorTool } from './connector-tool';
+import { ImageCreateTool } from './image-tool';
 
 /**
  * Stub tool used for tools that aren't implemented yet (Image, Text,
@@ -131,7 +132,7 @@ export function populateDefaultToolRegistry(): void {
     modes: ['grid'],
     placementLayer: 'media',
     snapPolicy: 'inherit-mode',
-    factory: () => new StubTool('image'),
+    factory: () => new ImageCreateTool(),
     icon: '🖼',
   });
 

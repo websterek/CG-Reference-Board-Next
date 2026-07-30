@@ -20,6 +20,8 @@ import { ToolsToolbar, type ToolToolbarAction } from '../ui/ToolsToolbar';
 import { UserPanel } from '../ui/UserPanel';
 import { MinimapPanel } from '../ui/MinimapPanel';
 import type { MinimapItem } from '../ui/MinimapPanel';
+import { ContextMenu } from '../ui/ContextMenu';
+import type { ContextMenuState } from '../canvas/controller';
 import { CanvasController } from '../canvas/controller';
 import { YjsBoardAdapter, type RemoteUpdate } from '../collab/YjsBoardAdapter';
 import { HocuspocusProvider } from '@hocuspocus/provider';
@@ -55,6 +57,19 @@ export function BoardPage() {
   );
   const minimap = useSyncExternalStore(subscribeMinimap, getMinimapSnapshot);
 
+  const subscribeContextMenu = useCallback(
+    (cb: (menu: ContextMenuState | null) => void) =>
+      controller?.subscribeContextMenu(cb) ?? (() => {}),
+    [controller],
+  );
+  const getContextMenuSnapshot = useCallback(
+    () => controllerRef.current
+      ? (controllerRef.current as unknown as { lastEmittedContextMenu: ContextMenuState | null }).lastEmittedContextMenu
+      : null,
+    [],
+  );
+  const contextMenu = useSyncExternalStore(subscribeContextMenu, getContextMenuSnapshot);
+
   useEffect(() => {
     if (!id || !containerRef.current) return;
 
@@ -80,9 +95,34 @@ export function BoardPage() {
       onItemChange: (u) => adapter.applyLocalAction({ id: u.id, partial: u.partial }),
       onItemDelete: (del) => adapter.deleteLocal(asItemId(del.id)),
       onItemCreate: (add) => adapter.createLocal(add.item),
+      boardId: id,
     });
+    // Wire paste errors to the UI store so the user sees a toast.
+    controller.onPasteError = (error: Error) => {
+      useUIStore.getState().pushToast?.({
+        level: 'error',
+        message: `Image paste failed: ${error.message}`,
+      });
+    };
     controllerRef.current = controller;
     setController(controller);
+
+    // Install the global paste listener. Bail if the user is typing in
+    // a text input (so pasting into an inspector field still works).
+    const onWindowPaste = (e: ClipboardEvent) => {
+      const active = document.activeElement;
+      if (
+        active &&
+        (active.tagName === 'INPUT' ||
+          active.tagName === 'TEXTAREA' ||
+          (active as HTMLElement).isContentEditable)
+      ) {
+        return;
+      }
+      e.preventDefault();
+      void controller.pasteImageFromClipboard(e);
+    };
+    window.addEventListener('paste', onWindowPaste);
 
     const onRemote = (u: RemoteUpdate) => {
       controller.applyRemoteUpdate(u.id, u.partial);
@@ -119,6 +159,7 @@ export function BoardPage() {
     }
 
     return () => {
+      window.removeEventListener('paste', onWindowPaste);
       provider.destroy();
       controller.destroy();
       providerRef.current = null;
@@ -201,6 +242,47 @@ export function BoardPage() {
         onResetZoom={handleResetZoom}
         onFit={handleFit}
       />
+      <ContextMenu
+        menu={contextMenu}
+        onClose={() => controllerRef.current?.closeContextMenu()}
+      />
+      <ToastList />
+    </div>
+  );
+}
+
+/**
+ * Minimal toast list renderer — reads from the UI store and renders
+ * a small floating panel. Each toast auto-dismisses after 4 seconds.
+ */
+function ToastList() {
+  const toasts = useUIStore((s) => s.toasts);
+  const dismiss = useUIStore((s) => s.dismissToast);
+  useEffect(() => {
+    if (toasts.length === 0) return;
+    const timeouts = toasts.map((t) =>
+      window.setTimeout(() => dismiss(t.id), 4000),
+    );
+    return () => {
+      for (const id of timeouts) window.clearTimeout(id);
+    };
+  }, [toasts, dismiss]);
+  if (toasts.length === 0) return null;
+  return (
+    <div className="toast-list" role="status" aria-live="polite">
+      {toasts.map((t) => (
+        <div key={t.id} className={`toast toast--${t.level}`} data-testid={`toast-${t.level}`}>
+          {t.message}
+          <button
+            type="button"
+            className="toast__close"
+            aria-label="Dismiss"
+            onClick={() => dismiss(t.id)}
+          >
+            ×
+          </button>
+        </div>
+      ))}
     </div>
   );
 }

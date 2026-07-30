@@ -18,6 +18,13 @@ import { getModeDef, resolveActiveToolOnModeSwitch } from '@gridboard/domain';
 
 export type ToolName = string;
 export type InteractionMode = string;
+export type ToastLevel = 'info' | 'success' | 'warn' | 'error';
+export interface Toast {
+  id: number;
+  level: ToastLevel;
+  message: string;
+  createdAt: number;
+}
 
 export interface UIState {
   activeTool: ToolName;
@@ -40,9 +47,21 @@ export interface UIState {
 
   inspectorOpen: boolean;
   toggleInspector: () => void;
+
+  /**
+   * Lightweight transient toast queue. Toasts are added by pushing
+   * (controller + UI chrome) and cleared after a timeout. A full
+   * toast system is out of scope; this is the minimum needed by
+   * paste-image-with-cover-fit (task 7.2) to surface paste errors.
+   */
+  toasts: Toast[];
+  pushToast: (toast: { level: ToastLevel; message: string }) => void;
+  dismissToast: (id: number) => void;
 }
 
 const INITIAL_MODE = 'grid';
+
+let nextToastId = 1;
 
 export const useUIStore = create<UIState>((set) => ({
   activeTool: getModeDef(INITIAL_MODE).defaultTool,
@@ -77,4 +96,15 @@ export const useUIStore = create<UIState>((set) => ({
 
   inspectorOpen: false,
   toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
+
+  toasts: [],
+  pushToast: (toast) =>
+    set((s) => ({
+      toasts: [
+        ...s.toasts,
+        { id: nextToastId++, level: toast.level, message: toast.message, createdAt: Date.now() },
+      ],
+    })),
+  dismissToast: (id) =>
+    set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
