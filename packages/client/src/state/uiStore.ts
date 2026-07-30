@@ -14,7 +14,7 @@
  */
 
 import { create } from 'zustand';
-import { getModeDef, isUniversalTool, resolveActiveToolOnModeSwitch } from '@gridboard/domain';
+import { getModeDef, resolveActiveToolOnModeSwitch } from '@gridboard/domain';
 
 export type ToolName = string;
 export type InteractionMode = string;
@@ -42,8 +42,10 @@ export interface UIState {
   toggleInspector: () => void;
 }
 
+const INITIAL_MODE = 'grid';
+
 export const useUIStore = create<UIState>((set) => ({
-  activeTool: getModeDef('grid').defaultTool,
+  activeTool: getModeDef(INITIAL_MODE).defaultTool,
   setActiveTool: (tool) =>
     set((s) => {
       // Remember the last-used tool for the current mode so a return
@@ -53,7 +55,7 @@ export const useUIStore = create<UIState>((set) => ({
       return { activeTool: tool, lastUsedToolPerMode: map };
     }),
 
-  interactionMode: 'grid',
+  interactionMode: INITIAL_MODE,
   setInteractionMode: (mode) =>
     set((s) => {
       // Resolve the new active tool per tool-registry-and-modes
@@ -76,6 +78,3 @@ export const useUIStore = create<UIState>((set) => ({
   inspectorOpen: false,
   toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
 }));
-
-// Re-export for callers that need the helper alongside state updates.
-export { isUniversalTool };

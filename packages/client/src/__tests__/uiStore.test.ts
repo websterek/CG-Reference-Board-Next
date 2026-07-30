@@ -25,9 +25,12 @@ describe('uiStore — interactionMode + activeTool transitions', () => {
     expect(interactionMode).toBe('grid');
   });
 
-  it('default activeTool is select (grid defaultTool)', () => {
-    const { activeTool } = useUIStore.getState();
-    expect(activeTool).toBe('select');
+  it('default activeTool matches the grid mode defaultTool (select)', () => {
+    // Per the locked decision: default tool on load is the mode's
+    // defaultTool (select for grid), not the first non-universal tool.
+    // This keeps the canvas in "ready to navigate / select" state on
+    // first load; the user opts into a creating tool via the toolbar.
+    expect(useUIStore.getState().activeTool).toBe('select');
   });
 
   it('setInteractionMode("annotation") updates state', () => {
