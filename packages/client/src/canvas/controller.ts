@@ -10,6 +10,12 @@ import {
   Application,
   Container,
   Graphics,
+  // CullerPlugin is re-exported by `pixi.js` and is already in the
+  // import graph via `Application` and `Container` (PixiJS v8
+  // registers extensions automatically). The named import is kept
+  // here to make the dependency on the plugin's API explicit at
+  // this module boundary, even though the symbol isn't referenced.
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   CullerPlugin,
 } from 'pixi.js';
 import {
@@ -57,10 +63,10 @@ import {
   hasInvalidReason,
 } from './placement-state';
 
-// Touch CullerPlugin so the bundler keeps it in the import graph; the
-// PixiJS v8 Application.init({ preference, ... }) handles registration
-// automatically when extensions namespace is imported.
-void CullerPlugin;
+// CullerPlugin is already in the import graph via the `Application` and
+// `Container` namespace imports from `pixi.js` — PixiJS v8 registers
+// extensions automatically. The named import is kept to make the
+// dependency on the plugin's API explicit at this module boundary.
 
 export interface CanvasControllerOptions {
   container: HTMLElement;
@@ -70,6 +76,26 @@ export interface CanvasControllerOptions {
   onItemChange: (update: { id: string; partial: Partial<BoardItem> }) => void;
   onItemDelete: (del: { id: string }) => void;
   onItemCreate: (add: { item: BoardItem }) => void;
+}
+
+/**
+ * Snapshot pushed to minimap listeners after any render-affecting
+ * change. Keeps the minimap decoupled from the controller's private
+ * maps.
+ */
+export interface MinimapItemSnapshot {
+  readonly id: string;
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly type: string;
+}
+
+export interface MinimapSnapshot {
+  readonly items: ReadonlyArray<MinimapItemSnapshot>;
+  readonly camera: { readonly x: number; readonly y: number; readonly zoom: number };
+  readonly viewport: { readonly width: number; readonly height: number };
 }
 
 export type ToolbarAction =
@@ -106,7 +132,22 @@ export class CanvasController {
   selection: Set<ItemId> = new Set();
 
   private camera: CameraState = { ...DEFAULT_CAMERA };
-  private grid: GridConfig = { ...DEFAULT_GRID_CONFIG };
+  /**
+   * Local grid config. Bumped from the domain default (`cellSize: 20`)
+   * to `32` so a single cell comfortably holds a square image and the
+   * dot grid reads at the default zoom. The domain default is the
+   * canonical "1 unit" of the system; this override only widens the
+   * visual cell. Snap / quantize math are unchanged.
+   */
+  private grid: GridConfig = { ...DEFAULT_GRID_CONFIG, cellSize: 32, subdivisions: 4 };
+
+  /**
+   * Per-render-frame listeners for the minimap. Each listener is
+   * called with a snapshot of items + camera after any render
+   * change. The minimap subscribes here so it does not need to read
+   * the controller's internal maps.
+   */
+  private renderListeners = new Set<(snap: MinimapSnapshot) => void>();
   private activeToolName: string = 'select';
   private activeMode: string = getAllModes()[0]?.id ?? 'grid';
 
@@ -265,9 +306,13 @@ export class CanvasController {
     this.world = world;
     this.initToolRegistry();
     this.installInputHandlers();
+    // Initial paint runs synchronously so the canvas isn't blank
+    // before the first frame.
     this.applyCamera();
     this.redrawGrid();
     this.cullViewport();
+    this.cullZoom = this.camera.zoom;
+    this.cameraDirty = false;
 
     // Subscribe to layer-registry changes so addLayer/deleteLayer calls
     // immediately reconcile the controller's derived lists and PixiJS
@@ -276,7 +321,8 @@ export class CanvasController {
       this.rebuildLayerState();
     });
 
-    // Redraw grid on resize so viewport-coverage stays correct
+    // Redraw grid on resize so viewport-coverage stays correct.
+    // Resize is rare; the synchronous path is fine.
     app.renderer.on('resize', () => {
       this.redrawGrid();
       this.cullViewport();
@@ -295,6 +341,7 @@ export class CanvasController {
       if (!this.items.has(id)) this.addItem(item);
       else this.updateItem(id, item);
     }
+    this.notifyRender();
   }
 
   addItem(item: BoardItem): void {
@@ -305,12 +352,30 @@ export class CanvasController {
     this.displayById.set(item.id, display);
     // Track last valid bounds
     this.lastValidBounds.set(item.id, { x: item.x, y: item.y, width: item.width, height: item.height });
+    this.notifyRender();
+  }
+
+  /**
+   * Track the outer-most mutation call. `notifyRender` is only
+   * invoked when the depth returns to 0, so chained calls
+   * (connector re-renders, dangling-flag fan-out) coalesce into a
+   * single minimap push per user interaction.
+   */
+  private mutationDepth = 0;
+
+  private endMutation(): void {
+    this.mutationDepth--;
+    if (this.mutationDepth === 0) this.notifyRender();
   }
 
   updateItem(id: string | ItemId, partial: Partial<BoardItem> | BoardItem): void {
+    this.mutationDepth++;
     const idItem = asItemId(String(id));
     const prev = this.items.get(idItem);
-    if (!prev) return;
+    if (!prev) {
+      this.endMutation();
+      return;
+    }
     const next: BoardItem =
       'id' in partial && partial.id === idItem
         ? (partial as BoardItem)
@@ -358,9 +423,11 @@ export class CanvasController {
       const connector = otherItem;
       this.updateItem(otherId, connector);
     }
+    this.endMutation();
   }
 
   removeItem(id: string | ItemId): void {
+    this.mutationDepth++;
     const idItem = asItemId(String(id));
     this.index.remove(idItem);
     const item = this.items.get(idItem);
@@ -397,6 +464,7 @@ export class CanvasController {
       this.updateItem(otherId, nextConnector);
       this.opts.onItemChange({ id: otherId, partial: { attrs: nextAttrs } });
     }
+    this.endMutation();
   }
 
   // ----- Selection / Mutations from outside -----
@@ -482,6 +550,13 @@ export class CanvasController {
   applyToolbarAction(action: ToolbarAction): void {
     if (action.type === 'set-tool') {
       this.activeToolName = action.tool;
+      // Update the cursor to match the new tool. Pan tools (Hand)
+      // get 'grab'; everything else gets 'default'. The spacebar
+      // path overrides this while held.
+      if (this.app?.canvas) {
+        this.app.canvas.style.cursor =
+          action.tool === 'hand' && !this.spacebar ? 'grab' : 'default';
+      }
     } else if (action.type === 'set-mode') {
       // Validate the mode ID against the registry. Unknown modes are
       // rejected (no silent state corruption).
@@ -502,33 +577,180 @@ export class CanvasController {
     }
   }
 
-  // ----- Camera -----
+  // ----- Camera (rAF-coalesced for 60 FPS pan/zoom) -----
+
+  /**
+   * Move the camera so `boardCenter` is at the visual center of the
+   * viewport. Used by the minimap "navigate" callback to center on
+   * a clicked position.
+   */
+  centerOn(boardCenter: Point): void {
+    this.camera = { ...this.camera, x: boardCenter.x, y: boardCenter.y };
+    this.scheduleCameraFlush({ redrawGrid: 'always' });
+  }
+
+  /** Current camera state (read-only view). */
+  getCamera(): { x: number; y: number; zoom: number } {
+    return { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom };
+  }
+
+  /** Current viewport size in screen pixels. */
+  getViewportSize(): { width: number; height: number } {
+    if (!this.app) return { width: 0, height: 0 };
+    return { width: this.app.screen.width, height: this.app.screen.height };
+  }
+
+  /**
+   * Compute the bounding box of all items in board coordinates.
+   * Used by the minimap "fit" action and by `getMinimapSnapshot`.
+   */
+  getItemsBounds(): Rect | null {
+    if (this.items.size === 0) return null;
+    let minX = Infinity;
+    let minY = Infinity;
+    let maxX = -Infinity;
+    let maxY = -Infinity;
+    for (const item of this.items.values()) {
+      if (item.x < minX) minX = item.x;
+      if (item.y < minY) minY = item.y;
+      if (item.x + item.width > maxX) maxX = item.x + item.width;
+      if (item.y + item.height > maxY) maxY = item.y + item.height;
+    }
+    if (!Number.isFinite(minX)) return null;
+    return { x: minX, y: minY, width: maxX - minX, height: maxY - minY };
+  }
+
+  /**
+   * Center the camera on the union of all items with sensible
+   * padding, then pick a zoom that fits them all in the viewport.
+   */
+  fitToContent(): void {
+    if (!this.app) return;
+    const bounds = this.getItemsBounds();
+    if (!bounds) {
+      this.camera = { x: 0, y: 0, zoom: 1 };
+      this.scheduleCameraFlush({ redrawGrid: 'always' });
+      return;
+    }
+    const padFactor = 0.1;
+    const paddedW = bounds.width * (1 + padFactor * 2);
+    const paddedH = bounds.height * (1 + padFactor * 2);
+    const zoomW = this.app.screen.width / paddedW;
+    const zoomH = this.app.screen.height / paddedH;
+    const zoom = Math.max(0.1, Math.min(2, Math.min(zoomW, zoomH)));
+    this.camera = {
+      ...this.camera,
+      x: bounds.x + bounds.width / 2,
+      y: bounds.y + bounds.height / 2,
+      zoom,
+    };
+    this.scheduleCameraFlush({ redrawGrid: 'always' });
+  }
+
+  /**
+   * Reset the camera to the default (centered at origin, zoom 1).
+   */
+  resetView(): void {
+    this.camera = { x: 0, y: 0, zoom: 1 };
+    this.scheduleCameraFlush({ redrawGrid: 'always' });
+  }
+
+  /**
+   * Subscribe to render-affecting state changes. Returns an
+   * unsubscribe function.
+   *
+   * The minimap uses this to keep its snapshot in sync without
+   * reading the controller's private maps.
+   */
+  onRender(listener: (snap: MinimapSnapshot) => void): () => void {
+    this.renderListeners.add(listener);
+    // Push the initial snapshot so the listener can render immediately.
+    queueMicrotask(() => {
+      if (this.renderListeners.has(listener)) listener(this.buildMinimapSnapshot());
+    });
+    return () => {
+      this.renderListeners.delete(listener);
+    };
+  }
+
+  /** Build a snapshot of items + camera for minimap consumers. */
+  private buildMinimapSnapshot(): MinimapSnapshot {
+    const items: MinimapItemSnapshot[] = [];
+    for (const [id, item] of this.items) {
+      items.push({
+        id: String(id),
+        x: item.x,
+        y: item.y,
+        width: item.width,
+        height: item.height,
+        type: item.type,
+      });
+    }
+    return {
+      items,
+      camera: { x: this.camera.x, y: this.camera.y, zoom: this.camera.zoom },
+      viewport: this.getViewportSize(),
+    };
+  }
+
+  /** Push the current snapshot to all render listeners. */
+  private notifyRender(): void {
+    if (this.renderListeners.size === 0) return;
+    const snap = this.buildMinimapSnapshot();
+    for (const listener of this.renderListeners) listener(snap);
+  }
 
   setZoom(zoom: number, around?: Point): void {
     const next = Math.max(0.1, Math.min(5, zoom));
     const px: Point = around ?? this.viewportCenter();
+    if (!this.world || !this.app) {
+      this.camera = { ...this.camera, zoom: next };
+      this.scheduleCameraFlush({ redrawGrid: 'always' });
+      return;
+    }
+    // Keep the world point under the cursor fixed across the zoom.
+    //
+    // The world transform is:
+    //   screenX = worldX * zoom + world.position.x
+    // where world.position.x = screenCenterX - camera.x * zoom.
+    //
+    // The world point currently under the cursor is `before`. After
+    // zooming to `next`, that same world point should still land at
+    // `px`. Solving for the new camera.x:
+    //   before.x * next + (screenCenterX - camera.x' * next) = px.x
+    //   camera.x' = before.x + (screenCenterX - px.x) / next
+    //
+    // Old (current) camera.x satisfies the same equation with
+    // `oldZoom`, so the delta is:
+    //   camera.x' - camera.x = (screenCenterX - px.x) * (1/next - 1/oldZoom)
+    //
+    // Equivalent and simpler to read: just compute the new camera
+    // position directly using the equation above.
     const before = this.screenToBoard(px);
-    this.camera = { ...this.camera, zoom: next };
-    this.applyCamera();
-    const after = this.screenToBoard(px);
+    const screenCenterX = this.app.screen.width / 2;
+    const screenCenterY = this.app.screen.height / 2;
     this.camera = {
       ...this.camera,
-      x: this.camera.x + (before.x - after.x),
-      y: this.camera.y + (before.y - after.y),
+      zoom: next,
+      x: before.x + (screenCenterX - px.x) / next,
+      y: before.y + (screenCenterY - px.y) / next,
     };
-    this.applyCamera();
-    this.redrawGrid();
-    this.cullViewport();
+    // Zoom changes the visible set, so a cull is required.
+    this.scheduleCameraFlush({ redrawGrid: 'always' });
   }
 
   pan(dx: number, dy: number): void {
+    // Pan is a pure translation; the visible set doesn't change so
+    // cull can be skipped. The rAF flush will redraw the grid +
+    // notify the minimap, both cheap relative to the world
+    // transform that's already been applied via `applyCamera()`
+    // inside the flush.
     this.camera = {
       ...this.camera,
       x: this.camera.x - dx / this.camera.zoom,
       y: this.camera.y - dy / this.camera.zoom,
     };
-    this.applyCamera();
-    this.redrawGrid();
+    this.scheduleCameraFlush({ redrawGrid: 'when-dirty' });
   }
 
   viewportCenter(): Point {
@@ -963,65 +1185,228 @@ export class CanvasController {
   }
 
   private screenToBoard(p: Point): Point {
-    if (!this.world) return p;
+    // Compute directly from the camera + screen size so the result
+    // is correct even between a `pan`/`setZoom` call and the rAF
+    // flush that updates `world.position`. The world transform is
+    // `worldX = (screenX - (screenCenter - camera.x * zoom)) / zoom`,
+    // so:
+    const screenCenterX = this.app ? this.app.screen.width / 2 : 0;
+    const screenCenterY = this.app ? this.app.screen.height / 2 : 0;
+    const zoom = this.camera.zoom;
     return {
-      x: (p.x - this.world.position.x) / this.camera.zoom,
-      y: (p.y - this.world.position.y) / this.camera.zoom,
+      x: this.camera.x + (p.x - screenCenterX) / zoom,
+      y: this.camera.y + (p.y - screenCenterY) / zoom,
     };
   }
 
+  // ----- Camera coalescing (60 FPS pan/zoom) -----
+
   /**
-   * Draw grid lines in world (board) coordinates.
-   * The gridGraphics is a child of gridLayer, which is a child of world —
-   * so the world transform (zoom + pan) is inherited automatically.
-   * Lines are drawn from floor(viewportMin/cell)*cell to ceil(viewportMax/cell)*cell.
+   * Camera state has changed; schedule a single rAF flush that
+   * applies the transform, redraws the grid, recomputes culling
+   * (only on zoom-level changes), and notifies minimap listeners.
+   *
+   * Per the perf brief: previously every `pointermove` during a pan
+   * synchronously re-issued thousands of PixiJS draw calls (one
+   * `circle + fill` per dot), re-ran viewport culling over every
+   * item, and re-painted the minimap canvas. At 60 Hz that produced
+   * visible jank. Now we batch all of that into one flush per
+   * animation frame.
+   *
+   * Pan is special: the grid is a child of the `world` container,
+   * so when `applyCamera` translates the world the grid moves with
+   * it for free. Re-issuing hundreds of `circle + fill` calls on
+   * every pan frame is pure waste — the dots already render at the
+   * right screen positions because their world positions are
+   * unchanged. So pan only applies the transform and updates the
+   * minimap viewport indicator; zoom additionally rebuilds the
+   * grid (because the visible world-space viewport changes) and
+   * runs culling (because the visible item set may change).
    */
+  private cameraDirty = true;
+  private cameraRafScheduled = false;
+  /** Track the last zoom we did a full cull for. */
+  private cullZoom = -1;
+  /** Track the last camera x/y we notified the minimap with. */
+  private lastNotifiedCameraX = NaN;
+  private lastNotifiedCameraY = NaN;
+  private lastNotifiedCameraZ = NaN;
+
+  private scheduleCameraFlush(
+    opts: { redrawGrid: 'always' | 'when-dirty' | 'never' } = { redrawGrid: 'never' },
+  ): void {
+    this.cameraDirty = true;
+    if (this.cameraRafScheduled) return;
+    this.cameraRafScheduled = true;
+    const flush = () => {
+      this.cameraRafScheduled = false;
+      if (!this.cameraDirty) return;
+      this.cameraDirty = false;
+      this.applyCamera();
+      // Decide whether to redraw the grid:
+      //  - 'always'  : zoom, fit, reset, centerOn — the visible
+      //                 world-space viewport or zoom changed, so
+      //                 the dot field must be rebuilt.
+      //  - 'when-dirty': pan — only redraw if the camera has crossed
+      //                 the field boundary (i.e. panned far enough
+      //                 that the existing field no longer covers
+      //                 the viewport). Otherwise the world transform
+      //                 is translating the field for free, and a
+      //                 redraw would be wasted work.
+      //  - 'never'   : not used currently, reserved for future
+      //                 optimization.
+      if (opts.redrawGrid === 'always') {
+        this.redrawGrid();
+      } else if (opts.redrawGrid === 'when-dirty') {
+        const margin = this.app
+          ? Math.max(this.app.screen.width, this.app.screen.height) /
+            this.camera.zoom *
+            CanvasController.GRID_FIELD_MARGIN
+          : 0;
+        const dx = Math.abs(this.camera.x - this.lastGridCameraX);
+        const dy = Math.abs(this.camera.y - this.lastGridCameraY);
+        if (dx > margin || dy > margin || Number.isNaN(this.lastGridCameraX)) {
+          this.redrawGrid();
+        }
+      }
+      // Cull only when zoom changed meaningfully (cull is O(N) over
+      // items). Pan alone doesn't change visibility, so skipping it
+      // during drags is safe.
+      if (opts.redrawGrid === 'always' && this.cullZoom !== this.camera.zoom) {
+        this.cullViewport();
+        this.cullZoom = this.camera.zoom;
+      }
+      // Notify minimap only when the snapshot would actually change.
+      // Pure pan: the camera x/y changed, so the viewport rect
+      // moves — notify. Zoom: the zoom changed — notify. Same
+      // camera state as last time: skip.
+      if (
+        this.camera.x !== this.lastNotifiedCameraX ||
+        this.camera.y !== this.lastNotifiedCameraY ||
+        this.camera.zoom !== this.lastNotifiedCameraZ
+      ) {
+        this.lastNotifiedCameraX = this.camera.x;
+        this.lastNotifiedCameraY = this.camera.y;
+        this.lastNotifiedCameraZ = this.camera.zoom;
+        this.notifyRender();
+      }
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(flush);
+    } else {
+      // Fallback: run synchronously. Used in non-browser tests.
+      flush();
+    }
+  }
+
+  /**
+   * Draw the grid in world (board) coordinates.
+   *
+   * Per the redesign brief: the grid is drawn as **dots** at each cell
+   * intersection (the "tile" corners). Two levels of emphasis:
+   *   - Minor dot at every cell corner.
+   *   - Major dot at every `subdivisions` cell corner.
+   *
+   * Dot radius is **counter-scaled by the current zoom** so the
+   * on-screen dot size stays constant regardless of zoom level
+   * (per the brief: "Zooming changes size of dots forming grids,
+   * they should stay uniform"). The gridGraphics is a child of
+   * gridLayer, which is a child of world — so the world transform
+   * (zoom + pan) is inherited automatically.
+   *
+   * "Infinite" grid: the dot field is drawn with a margin of
+   * `GRID_FIELD_MARGIN` viewport-widths in every direction around
+   * the camera, so panning 1-2 screens in any direction never
+   * exposes the edge. The cost is a fixed number of cells per
+   * zoom level (proportional to the field area), independent of
+   * how far the user has panned. The world transform translates
+   * the field for free — the only cost during pan is rebuilding
+   * the field when the camera crosses the field boundary.
+   */
+  private static readonly GRID_FIELD_MARGIN = 1.5;
+  private lastGridCameraX = NaN;
+  private lastGridCameraY = NaN;
+
   private redrawGrid(): void {
     if (!this.gridGraphics || !this.app || !this.world) return;
     const g = this.gridGraphics.clear();
     const cell = this.grid.cellSize;
-    const subDiv = this.grid.subdivisions;
+    const subDiv = Math.max(1, this.grid.subdivisions);
+    const zoom = this.camera.zoom;
 
-    // Viewport in board coordinates
-    const w = this.app.screen.width / this.camera.zoom;
-    const h = this.app.screen.height / this.camera.zoom;
-    const vpMinX = this.camera.x - w / 2;
-    const vpMinY = this.camera.y - h / 2;
-    const vpMaxX = this.camera.x + w / 2;
-    const vpMaxY = this.camera.y + h / 2;
+    // Counter-scale radii so screen-space dot size is constant.
+    // Target: ~1.6 px minor / 2.6 px major on screen.
+    const targetMinorPx = 1.6;
+    const targetMajorPx = 2.6;
+    const minorRadius = targetMinorPx / zoom;
+    const majorRadius = targetMajorPx / zoom;
+    const minorColor = 0x2c313b;
+    const majorColor = 0x4a5260;
+
+    // Hide the grid when cells become microscopic — at very high
+    // zoom-out the dots would overlap and turn into a solid wash.
+    // We hide (don't remove) by simply skipping the draw; the next
+    // flush at a more reasonable zoom restores it.
+    if (cell * zoom < 4) {
+      return;
+    }
+
+    // Field bounds in world coordinates: viewport plus a margin so
+    // small pans don't expose the field edge. The margin is a
+    // multiple of the viewport, so the field is "infinite" up to
+    // the user panning several screens in one direction without
+    // crossing the boundary. The world transform handles the
+    // in-between panning.
+    const vpW = this.app.screen.width / zoom;
+    const vpH = this.app.screen.height / zoom;
+    const margin = Math.max(vpW, vpH) * CanvasController.GRID_FIELD_MARGIN;
+    const vpMinX = this.camera.x - vpW / 2 - margin;
+    const vpMinY = this.camera.y - vpH / 2 - margin;
+    const vpMaxX = this.camera.x + vpW / 2 + margin;
+    const vpMaxY = this.camera.y + vpH / 2 + margin;
 
     const startX = Math.floor(vpMinX / cell) * cell;
     const endX = Math.ceil(vpMaxX / cell) * cell;
     const startY = Math.floor(vpMinY / cell) * cell;
     const endY = Math.ceil(vpMaxY / cell) * cell;
 
-    // Minor grid lines
-    g.setStrokeStyle({ width: 1, color: 0x2a2f3a, alpha: 0.5 });
-    for (let x = startX; x <= endX; x += cell) {
-      g.moveTo(x, startY);
-      g.lineTo(x, endY);
-      g.stroke();
-    }
-    for (let y = startY; y <= endY; y += cell) {
-      g.moveTo(startX, y);
-      g.lineTo(endX, y);
-      g.stroke();
-    }
+    this.lastGridCameraX = this.camera.x;
+    this.lastGridCameraY = this.camera.y;
 
-    // Major grid lines (every subdivisions-th cell)
+    // Draw every dot in one batched path so PixiJS issues a single
+    // GPU draw call per (major / minor) group, not one per dot.
+    // PixiJS v8 Graphics accumulates geometry; the `fill` at the
+    // end commits the whole path. This is the critical perf win
+    // for panning at 60 FPS.
+    g.setFillStyle({ color: minorColor, alpha: 0.7 });
+    for (let x = startX; x <= endX; x += cell) {
+      for (let y = startY; y <= endY; y += cell) {
+        g.circle(x, y, minorRadius);
+      }
+    }
+    g.fill();
+
     if (subDiv > 1) {
-      g.setStrokeStyle({ width: 1.5, color: 0x3a3f4a, alpha: 0.7 });
       const majorStep = cell * subDiv;
-      for (let x = startX; x <= endX; x += majorStep) {
-        g.moveTo(x, startY);
-        g.lineTo(x, endY);
-        g.stroke();
+      // Align major dots to their own world-space grid (multiples
+      // of `majorStep`) so they stay anchored to fixed board
+      // positions as the camera moves. If we reused `startX` /
+      // `startY` (which align to `cell`), the major-dot positions
+      // would be a function of the minor-dot alignment, which
+      // changes as the camera scrolls sub-cell distances — making
+      // the major dots appear to "jump" between minor dot
+      // positions during a smooth pan.
+      const majorStartX = Math.floor(vpMinX / majorStep) * majorStep;
+      const majorEndX = Math.ceil(vpMaxX / majorStep) * majorStep;
+      const majorStartY = Math.floor(vpMinY / majorStep) * majorStep;
+      const majorEndY = Math.ceil(vpMaxY / majorStep) * majorStep;
+      g.setFillStyle({ color: majorColor, alpha: 0.95 });
+      for (let x = majorStartX; x <= majorEndX; x += majorStep) {
+        for (let y = majorStartY; y <= majorEndY; y += majorStep) {
+          g.circle(x, y, majorRadius);
+        }
       }
-      for (let y = startY; y <= endY; y += majorStep) {
-        g.moveTo(startX, y);
-        g.lineTo(endX, y);
-        g.stroke();
-      }
+      g.fill();
     }
   }
 
@@ -1156,7 +1541,7 @@ export class CanvasController {
       case 'image':
         return renderImage(item);
       case 'frame':
-        return renderFrame(item);
+        return renderFrame(item, { grid: this.grid });
       case 'annotation-stroke':
         return renderAnnotation(item);
       case 'connector':
@@ -1183,6 +1568,10 @@ export class CanvasController {
         // intercept plain scroll-wheel events for canvas zoom.
         if (e.ctrlKey || e.metaKey) return;
         e.preventDefault();
+        // Use exponential mapping for smooth, multiplicative zoom
+        // (one notch on a mouse wheel is ~deltaY=100, on a trackpad
+        // it's much smaller; the exponential makes both feel
+        // consistent and keeps the zoom step gentle).
         const delta = -e.deltaY * 0.0015;
         const rect = canvas.getBoundingClientRect();
         const px: Point = {
@@ -1286,9 +1675,23 @@ export class CanvasController {
       const boardPt = this.screenToBoard(screenPt);
       this.lastPointerBoard = boardPt;
 
-      if (this.spacebar) {
+      // Pan via spacebar OR the Hand tool — both go through the
+      // same `dragState.kind === 'pan'` pointermove branch so the
+      // behavior is byte-identical (same screen-space delta, same
+      // rAF-coalesced flush).
+      if (this.spacebar || this.activeToolName === 'hand') {
         this.dragState = { kind: 'pan', startScreen: screenPt };
         canvas.style.cursor = 'grabbing';
+        // Capture the pointer so pointermove/up fire on the canvas
+        // even if the user drags off the element. Without this the
+        // Hand tool drops events as soon as the cursor leaves the
+        // canvas, producing the chatter the user reported.
+        try {
+          canvas.setPointerCapture(e.pointerId);
+        } catch {
+          // Some browsers throw if the pointer isn't active. Safe
+          // to ignore — capture is an optimization, not required.
+        }
         return;
       }
 
@@ -1825,7 +2228,19 @@ export class CanvasController {
         tool.onPointerUp(liteEvent, ctx);
       }
 
+      // Release pointer capture if we acquired it during pan. Safe
+      // to call even when no capture was set.
+      const ds = this.dragState as { kind: string } | null;
+      if (e && ds?.kind === 'pan') {
+        try {
+          canvas.releasePointerCapture(e.pointerId);
+        } catch {
+          // Some browsers throw if the capture is no longer active.
+        }
+      }
+
       if (this.spacebar) canvas.style.cursor = 'grab';
+      else if (this.activeToolName === 'hand') canvas.style.cursor = 'grab';
       else canvas.style.cursor = 'default';
     };
     canvas.addEventListener('pointerup', endDrag);

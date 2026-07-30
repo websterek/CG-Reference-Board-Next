@@ -76,14 +76,20 @@ describe('14.9: spacebar pan independence from active tool', () => {
 
     const pointerdownBlock = source.slice(pointerdownStart, pointermoveStart);
 
-    // The spacebar check should appear BEFORE the tool registry dispatch
-    const spacebarCheckIdx = pointerdownBlock.indexOf('if (this.spacebar)');
+    // The spacebar / pan check should appear BEFORE the tool registry
+    // dispatch. The current code unifies the spacebar pan and the
+    // Hand-tool pan in a single check (`if (this.spacebar || ...`),
+    // so we look for either pattern. The intent is the same: pan
+    // must short-circuit before the active tool is allowed to
+    // intercept the pointerdown.
+    const spacebarCheckIdx =
+      pointerdownBlock.indexOf('this.spacebar');
     const toolDispatchIdx = pointerdownBlock.indexOf('this.toolRegistry.get');
 
     expect(spacebarCheckIdx).toBeGreaterThan(0);
     expect(toolDispatchIdx).toBeGreaterThan(0);
-    // Spacebar check must come first — if it didn't, spacebar pan would
-    // be intercepted by the active tool's onPointerDown.
+    // Spacebar / pan check must come first — if it didn't, the pan
+    // would be intercepted by the active tool's onPointerDown.
     expect(spacebarCheckIdx).toBeLessThan(toolDispatchIdx);
   });
 
