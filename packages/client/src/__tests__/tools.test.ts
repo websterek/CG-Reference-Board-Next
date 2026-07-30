@@ -184,14 +184,14 @@ describe('FrameCreateTool canPlace gating (Task 11.3)', () => {
       return true;
     });
 
-    // Click at (33, 47) → snap to (40, 40); min frame size 20×20.
+    // Click at (33, 47) → snap to (40, 40); min frame size 32×32.
     tool.onPointerDown(makePointerEvent(33, 47), ctx);
 
     expect(calls.length).toBe(1);
     expect(calls[0]!.rect.x).toBe(40);
     expect(calls[0]!.rect.y).toBe(40);
-    expect(calls[0]!.rect.width).toBe(20);
-    expect(calls[0]!.rect.height).toBe(20);
+    expect(calls[0]!.rect.width).toBe(32);
+    expect(calls[0]!.rect.height).toBe(32);
     expect(calls[0]!.kind).toBe('frame');
   });
 

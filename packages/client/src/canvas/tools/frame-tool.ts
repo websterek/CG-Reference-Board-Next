@@ -8,7 +8,8 @@
 
 import type { LayerKind, Tool, ToolContext, PointerEventLite } from '@gridboard/domain';
 
-const FRAME_MIN_SIZE = 20; // 1 cell
+// Aligned with controller's grid.cellSize override (32). One cell at default zoom.
+const FRAME_MIN_SIZE = 32; // 1 cell
 const FRAME_KIND: LayerKind = 'frame';
 
 export class FrameCreateTool implements Tool {
