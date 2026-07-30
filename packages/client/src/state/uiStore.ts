@@ -5,13 +5,19 @@
  * (React re-renders are poison for 60 FPS canvas interaction, see design.md D5).
  * Zustand holds tool selection, panel visibility, and a summary of the current
  * selection count for the inspector panel.
+ *
+ * Per tool-registry-and-modes: `ToolName` and `InteractionMode` are now plain
+ * `string` aliases — the closed unions have been replaced by the `ModeDefinition`
+ * and `ToolDefinition` registries. `setInteractionMode` performs the
+ * mode-switch logic that preserves universal active tools and remembers the
+ * last-used tool per mode.
  */
 
 import { create } from 'zustand';
+import { getModeDef, isUniversalTool, resolveActiveToolOnModeSwitch } from '@gridboard/domain';
 
-export type ToolName = 'select' | 'rectangle' | 'frame' | 'annotation-freehand';
-
-export type InteractionMode = 'grid' | 'annotation';
+export type ToolName = string;
+export type InteractionMode = string;
 
 export interface UIState {
   activeTool: ToolName;
@@ -19,6 +25,15 @@ export interface UIState {
 
   interactionMode: InteractionMode;
   setInteractionMode: (mode: InteractionMode) => void;
+
+  /**
+   * Per-mode memory of the last tool the user picked. When entering a
+   * mode, if the current tool is not universal, the system looks here
+   * for the most recent tool the user chose in that mode. See
+   * `resolveActiveToolOnModeSwitch` for the resolution rules.
+   */
+  lastUsedToolPerMode: Record<string, string>;
+  setLastUsedTool: (modeId: string, toolId: string) => void;
 
   selectionCount: number;
   setSelectionCount: (n: number) => void;
@@ -28,11 +43,32 @@ export interface UIState {
 }
 
 export const useUIStore = create<UIState>((set) => ({
-  activeTool: 'select',
-  setActiveTool: (tool) => set({ activeTool: tool }),
+  activeTool: getModeDef('grid').defaultTool,
+  setActiveTool: (tool) =>
+    set((s) => {
+      // Remember the last-used tool for the current mode so a return
+      // to this mode restores the tool the user had picked.
+      const map = { ...s.lastUsedToolPerMode };
+      map[s.interactionMode] = tool;
+      return { activeTool: tool, lastUsedToolPerMode: map };
+    }),
 
-  interactionMode: 'grid' as const,
-  setInteractionMode: (mode) => set({ interactionMode: mode }),
+  interactionMode: 'grid',
+  setInteractionMode: (mode) =>
+    set((s) => {
+      // Resolve the new active tool per tool-registry-and-modes
+      // proposal D7.
+      const newTool = resolveActiveToolOnModeSwitch(
+        s.activeTool,
+        mode,
+        s.lastUsedToolPerMode,
+      );
+      return { interactionMode: mode, activeTool: newTool };
+    }),
+
+  lastUsedToolPerMode: {},
+  setLastUsedTool: (modeId, toolId) =>
+    set((s) => ({ lastUsedToolPerMode: { ...s.lastUsedToolPerMode, [modeId]: toolId } })),
 
   selectionCount: 0,
   setSelectionCount: (n) => set({ selectionCount: n }),
@@ -40,3 +76,6 @@ export const useUIStore = create<UIState>((set) => ({
   inspectorOpen: false,
   toggleInspector: () => set((s) => ({ inspectorOpen: !s.inspectorOpen })),
 }));
+
+// Re-export for callers that need the helper alongside state updates.
+export { isUniversalTool };

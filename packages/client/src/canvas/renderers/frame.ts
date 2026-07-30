@@ -1,6 +1,9 @@
 /**
  * Frame renderer — PixiJS Graphics with a dashed/dotted border style.
  * Frames are visual markers on the `frame` layer kind.
+ *
+ * PixiJS v8 `Graphics` extends `Container`, so the returned object is itself
+ * a Container — no cast required.
  */
 
 import { Container, Graphics } from 'pixi.js';
@@ -14,5 +17,5 @@ export function renderFrame(item: BoardItem): Container {
   g.setStrokeStyle({ width: 2, color: 0x5a7a9a, alpha: 0.8 });
   g.stroke();
   g.position.set(item.x, item.y);
-  return g as unknown as Container;
+  return g;
 }

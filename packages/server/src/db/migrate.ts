@@ -43,7 +43,10 @@ export async function runMigrations(): Promise<void> {
       console.log('[migrations] SQLite Drizzle migrations applied');
       // Keep the handle alive for the Hocuspocus byte-store to pick up
       // later. Close() will run via `closeDb()` during graceful shutdown.
-      registerSqliteForByteStore(sqlite);
+      // Must be awaited: `getSqlite()` in `collab/hocuspocus.ts` reads the
+      // handle synchronously, and a non-awaited promise would let
+      // `buildApp()` race the dynamic `./client.js` import.
+      await registerSqliteForByteStore(sqlite);
     } catch (err) {
       sqlite.close();
       throw err;

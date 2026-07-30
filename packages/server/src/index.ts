@@ -12,6 +12,7 @@
  *   8. listen()
  */
 
+import { pathToFileURL } from 'node:url';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import multipart from '@fastify/multipart';
@@ -69,7 +70,15 @@ export async function main(): Promise<void> {
 }
 
 // Run when invoked directly (tsx watch / prod start).
-const isEntry = import.meta.url === `file://${process.argv[1]}`;
+// `process.argv[1]` is a raw OS path (backslashes + drive letters on Windows;
+// bare relative under tsx), but `import.meta.url` is a file URL with
+// forward-slashes and a triple-slash authority. Naive string concat only
+// matches on POSIX with an absolute path. Resolve through `pathToFileURL`
+// so the entry-point detection works on both platforms.
+const entryArg = process.argv[1] ?? '';
+const isEntry =
+  import.meta.url === pathToFileURL(entryArg).href ||
+  import.meta.url === `file://${entryArg}`;
 if (isEntry) {
   main().catch((err) => {
     console.error('[gridboard-server] fatal:', err);

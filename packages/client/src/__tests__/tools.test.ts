@@ -60,11 +60,38 @@ function makeStubContext(): ToolContext & {
     },
     queueUpdate() {},
     flushQueuedUpdates() {},
+    canPlace() {
+      // Default stub: allow all placements. Tests that need rejection behavior
+      // override this method on the returned context.
+      return true;
+    },
     setActiveTool() {},
+    getItem() {
+      return undefined;
+    },
+    hitTest() {
+      return null;
+    },
     createdItems,
     updatedItems,
     deletedItems,
   };
+}
+
+/**
+ * Same as makeStubContext but lets the caller inject a canPlace predicate
+ * so tests can simulate placement validation without wiring up a controller.
+ */
+function makeStubContextWithCanPlace(
+  canPlacePredicate: (rect: { x: number; y: number; width: number; height: number }, kind: string) => boolean,
+): ToolContext & {
+  createdItems: Array<Record<string, unknown>>;
+  updatedItems: Array<{ id: string; partial: Record<string, unknown> }>;
+  deletedItems: string[];
+} {
+  const ctx = makeStubContext();
+  ctx.canPlace = (rect, kind) => canPlacePredicate(rect, kind as 'frame' | 'media' | 'overlay' | 'annotation');
+  return ctx;
 }
 
 // ---------------------------------------------------------------------------
@@ -117,6 +144,65 @@ describe('FrameCreateTool (Task 10.4)', () => {
     // After pointer up, further moves should not update
     tool.onPointerMove(makePointerEvent(200, 200), ctx);
     expect(ctx.updatedItems.length).toBe(beforeUp);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Task 11.3 — FrameCreateTool canPlace gating
+// ---------------------------------------------------------------------------
+
+describe('FrameCreateTool canPlace gating (Task 11.3)', () => {
+  it('calls canPlace before createItem on pointer down', () => {
+    const tool = new FrameCreateTool();
+    let canPlaceCalled = false;
+    const ctx = makeStubContextWithCanPlace(() => {
+      canPlaceCalled = true;
+      return true;
+    });
+
+    tool.onPointerDown(makePointerEvent(0, 0), ctx);
+
+    expect(canPlaceCalled).toBe(true);
+    expect(ctx.createdItems.length).toBe(1);
+  });
+
+  it('does not create an item when canPlace rejects the placement', () => {
+    const tool = new FrameCreateTool();
+    const ctx = makeStubContextWithCanPlace(() => false);
+
+    tool.onPointerDown(makePointerEvent(0, 0), ctx);
+
+    expect(ctx.createdItems.length).toBe(0);
+    expect(ctx.updatedItems.length).toBe(0);
+  });
+
+  it('passes the snapped position and frame dimensions to canPlace', () => {
+    const tool = new FrameCreateTool();
+    const calls: Array<{ rect: { x: number; y: number; width: number; height: number }; kind: string }> = [];
+    const ctx = makeStubContextWithCanPlace((rect, kind) => {
+      calls.push({ rect, kind });
+      return true;
+    });
+
+    // Click at (33, 47) → snap to (40, 40); min frame size 20×20.
+    tool.onPointerDown(makePointerEvent(33, 47), ctx);
+
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.rect.x).toBe(40);
+    expect(calls[0]!.rect.y).toBe(40);
+    expect(calls[0]!.rect.width).toBe(20);
+    expect(calls[0]!.rect.height).toBe(20);
+    expect(calls[0]!.kind).toBe('frame');
+  });
+
+  it('creates an item when canPlace accepts the placement', () => {
+    const tool = new FrameCreateTool();
+    const ctx = makeStubContextWithCanPlace(() => true);
+
+    tool.onPointerDown(makePointerEvent(100, 100), ctx);
+
+    expect(ctx.createdItems.length).toBe(1);
+    expect(ctx.createdItems[0]!.type).toBe('frame');
   });
 });
 

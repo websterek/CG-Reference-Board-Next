@@ -1,6 +1,10 @@
 /**
  * Rectangle renderer — PixiJS Graphics with fill + stroke.
  * Uses natural dimensions for display.
+ *
+ * PixiJS v8 `Graphics` extends `Container`, so the returned object is itself
+ * a Container — no cast required. (Same rationale as `frame.ts` and
+ * `annotation.ts` per Bug #14 in `data-integrity-bugfixes`.)
  */
 
 import { Container, Graphics } from 'pixi.js';
@@ -21,5 +25,5 @@ export function renderRectangle(item: BoardItem): Container {
   g.position.set(item.x, item.y);
   // `width` and `height` accessors on Graphics expose measured bounds.
   void (g as unknown as { width?: number; height?: number });
-  return g as unknown as Container;
+  return g;
 }

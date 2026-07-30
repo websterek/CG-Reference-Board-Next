@@ -6,7 +6,10 @@
  * dragState) so it can coexist with the built-in select/rectangle tools.
  */
 
-import type { Tool, ToolContext, PointerEventLite } from '@gridboard/domain';
+import type { LayerKind, Tool, ToolContext, PointerEventLite } from '@gridboard/domain';
+
+const FRAME_MIN_SIZE = 20; // 1 cell
+const FRAME_KIND: LayerKind = 'frame';
 
 export class FrameCreateTool implements Tool {
   readonly name = 'frame';
@@ -18,6 +21,22 @@ export class FrameCreateTool implements Tool {
 
   onPointerDown(event: PointerEventLite, ctx: ToolContext): void {
     const snapped = ctx.snap(event.point);
+
+    // Validate placement before creating the item. A frame occupies a 1×1
+    // cell footprint at the snap point; reject if a same-kind item already
+    // occupies that cell. If rejected, do not create the frame.
+    const proposed = {
+      x: snapped.x,
+      y: snapped.y,
+      width: FRAME_MIN_SIZE,
+      height: FRAME_MIN_SIZE,
+    };
+    if (!ctx.canPlace(proposed, FRAME_KIND)) {
+      this.dragging = false;
+      this.itemId = null;
+      return;
+    }
+
     this.startX = snapped.x;
     this.startY = snapped.y;
     this.dragging = true;
@@ -26,8 +45,8 @@ export class FrameCreateTool implements Tool {
       type: 'frame',
       x: snapped.x,
       y: snapped.y,
-      width: 20, // minimum 1 cell
-      height: 20,
+      width: FRAME_MIN_SIZE, // minimum 1 cell
+      height: FRAME_MIN_SIZE,
       attrs: {},
     });
   }
@@ -37,11 +56,11 @@ export class FrameCreateTool implements Tool {
 
     const x = Math.min(this.startX, event.point.x);
     const y = Math.min(this.startY, event.point.y);
-    const w = Math.max(20, Math.abs(event.point.x - this.startX));
-    const h = Math.max(20, Math.abs(event.point.y - this.startY));
+    const w = Math.max(FRAME_MIN_SIZE, Math.abs(event.point.x - this.startX));
+    const h = Math.max(FRAME_MIN_SIZE, Math.abs(event.point.y - this.startY));
     const snapped = ctx.snap({ x, y });
-    const sw = Math.max(20, Math.round(w / 20) * 20);
-    const sh = Math.max(20, Math.round(h / 20) * 20);
+    const sw = Math.max(FRAME_MIN_SIZE, Math.round(w / FRAME_MIN_SIZE) * FRAME_MIN_SIZE);
+    const sh = Math.max(FRAME_MIN_SIZE, Math.round(h / FRAME_MIN_SIZE) * FRAME_MIN_SIZE);
 
     ctx.updateItem(this.itemId, { x: snapped.x, y: snapped.y, width: sw, height: sh });
   }

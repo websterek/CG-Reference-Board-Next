@@ -1,18 +1,33 @@
 /**
- * Toolbar — UI chrome (select / rectangle / delete tools).
+ * Toolbar — UI chrome (universal + mode-scoped tool buttons).
  *
- * NEVER imports yjs or @hocuspocus — see ESLint `no-restricted-imports` rule
- * that enforces D1 boundary.
+ * Renders two rows:
+ *   - Universal row: Select, Move, Hand (always visible).
+ *   - Mode-scoped row: tools from `getToolsForMode(interactionMode)`
+ *     excluding the universal tools.
+ *
+ * Per tool-registry-and-modes proposal: mode-conditional tool hiding
+ * (the old `{!isGrid && ...}` block) is removed. The toolbar is driven
+ * by the `ToolDefinition` registry, not hardcoded JSX.
  */
 
+import {
+  getAllModes,
+  getModeDef,
+} from '@gridboard/domain';
+import {
+  getAllTools,
+  getToolsForMode,
+} from '../canvas/tools';
+import type { ToolDefinition } from '../canvas/tools';
 import { useUIStore } from '../state/uiStore';
-import type { InteractionMode } from '../state/uiStore';
 
-// ToolbarAction: shared shape with CanvasController. Mirror it locally so the
-// UI layer doesn't import from canvas/.
+// ToolbarAction mirrors the controller's ToolbarAction shape (see
+// packages/client/src/canvas/controller.ts). Keep this in sync; both
+// sides accept `{type, ...}` records with `string` tool/mode values.
 export type ToolbarAction =
-  | { type: 'set-tool'; tool: 'select' | 'rectangle' | 'frame' | 'annotation-freehand' }
-  | { type: 'set-mode'; mode: InteractionMode }
+  | { type: 'set-tool'; tool: string }
+  | { type: 'set-mode'; mode: string }
   | { type: 'delete-selected' };
 
 export interface ToolbarProps {
@@ -24,13 +39,21 @@ export interface ToolbarProps {
 export function Toolbar({ onAction, connected, role }: ToolbarProps) {
   const { activeTool, setActiveTool, interactionMode, setInteractionMode } = useUIStore();
 
-  const isGrid = interactionMode === 'grid';
+  // Universal tools: present in every mode. Driven by the
+  // ToolDefinition registry (`alwaysAvailable: true`).
+  const allTools: ToolDefinition[] = getAllTools();
+  const universalTools = allTools.filter((t) => t.alwaysAvailable);
+  const modeTools = getToolsForMode(interactionMode).filter((t) => !t.alwaysAvailable);
 
   const handleModeToggle = () => {
-    const next: InteractionMode = isGrid ? 'annotation' : 'grid';
-    setInteractionMode(next);
-    onAction({ type: 'set-mode', mode: next });
+    const modes = getAllModes();
+    const idx = modes.findIndex((m) => m.id === interactionMode);
+    const next = idx === -1 ? modes[0]! : modes[(idx + 1) % modes.length]!;
+    setInteractionMode(next.id);
+    onAction({ type: 'set-mode', mode: next.id });
   };
+
+  const modeLabel = getModeDef(interactionMode).displayName;
 
   return (
     <header className="toolbar">
@@ -38,63 +61,53 @@ export function Toolbar({ onAction, connected, role }: ToolbarProps) {
         <button
           className="btn btn--mode"
           onClick={handleModeToggle}
-          aria-pressed={!isGrid}
           aria-label="Toggle interaction mode"
+          data-mode={interactionMode}
         >
-          Mode: {isGrid ? 'Grid' : 'Annotation'}
+          Mode: {modeLabel}
         </button>
 
-        {isGrid && (
-          <>
+        {/* Universal row — Select, Move, Hand. Always visible. */}
+        <div className="toolbar__universal" role="toolbar" aria-label="Universal tools">
+          {universalTools.map((t) => (
             <button
-              className={`btn ${activeTool === 'select' ? 'btn--active' : ''}`}
+              key={t.id}
+              className={`btn ${activeTool === t.id ? 'btn--active' : ''}`}
               onClick={() => {
-                setActiveTool('select');
-                onAction({ type: 'set-tool', tool: 'select' });
+                setActiveTool(t.id);
+                onAction({ type: 'set-tool', tool: t.id });
               }}
-              aria-pressed={activeTool === 'select'}
-              aria-label="Select tool"
+              aria-pressed={activeTool === t.id}
+              aria-label={`${t.displayName} tool`}
+              title={t.displayName}
             >
-              ▦
+              {t.icon}
             </button>
-            <button
-              className={`btn ${activeTool === 'rectangle' ? 'btn--active' : ''}`}
-              onClick={() => {
-                setActiveTool('rectangle');
-                onAction({ type: 'set-tool', tool: 'rectangle' });
-              }}
-              aria-pressed={activeTool === 'rectangle'}
-              aria-label="Rectangle tool"
-            >
-              ▭
-            </button>
-            <button
-              className={`btn ${activeTool === 'frame' ? 'btn--active' : ''}`}
-              onClick={() => {
-                setActiveTool('frame');
-                onAction({ type: 'set-tool', tool: 'frame' });
-              }}
-              aria-pressed={activeTool === 'frame'}
-              aria-label="Frame tool"
-            >
-              ⊞
-            </button>
-          </>
-        )}
+          ))}
+        </div>
 
-        {!isGrid && (
-          <button
-            className={`btn ${activeTool === 'annotation-freehand' ? 'btn--active' : ''}`}
-            onClick={() => {
-              setActiveTool('annotation-freehand');
-              onAction({ type: 'set-tool', tool: 'annotation-freehand' });
-            }}
-            aria-pressed={activeTool === 'annotation-freehand'}
-            aria-label="Annotation freehand tool"
-          >
-            ✎
-          </button>
-        )}
+        {/* Mode-scoped row — tools for the current mode, excluding universal. */}
+        <div
+          className="toolbar__modescoped"
+          role="toolbar"
+          aria-label={`${modeLabel} tools`}
+        >
+          {modeTools.map((t) => (
+            <button
+              key={t.id}
+              className={`btn ${activeTool === t.id ? 'btn--active' : ''}`}
+              onClick={() => {
+                setActiveTool(t.id);
+                onAction({ type: 'set-tool', tool: t.id });
+              }}
+              aria-pressed={activeTool === t.id}
+              aria-label={`${t.displayName} tool`}
+              title={t.displayName}
+            >
+              {t.icon}
+            </button>
+          ))}
+        </div>
 
         <button
           className="btn"
@@ -113,3 +126,4 @@ export function Toolbar({ onAction, connected, role }: ToolbarProps) {
     </header>
   );
 }
+
