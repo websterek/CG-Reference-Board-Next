@@ -107,6 +107,7 @@ export interface BoardItem {
   readonly height: number;
   readonly rotation: number; // radians
   readonly layerId: LayerId;
+  readonly zIndex?: number;  // optional z-order override (undefined = layer default)
   readonly attrs: Readonly<Record<string, unknown>>;
 }
 
@@ -237,6 +238,7 @@ export const BoardItemSchema = z.object({
   width: z.number().nonnegative(),
   height: z.number().nonnegative(),
   rotation: z.number(),
+  zIndex: z.number().optional(),
   layerId: z
     .string()
     .min(1)

@@ -10,12 +10,7 @@ import {
   Application,
   Container,
   Graphics,
-  // CullerPlugin is re-exported by `pixi.js` and is already in the
-  // import graph via `Application` and `Container` (PixiJS v8
-  // registers extensions automatically). The named import is kept
-  // here to make the dependency on the plugin's API explicit at
-  // this module boundary, even though the symbol isn't referenced.
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  extensions,
   CullerPlugin,
 } from 'pixi.js';
 import {
@@ -62,11 +57,6 @@ import {
   makeInvalidPlacement,
   hasInvalidReason,
 } from './placement-state';
-
-// CullerPlugin is already in the import graph via the `Application` and
-// `Container` namespace imports from `pixi.js` — PixiJS v8 registers
-// extensions automatically. The named import is kept to make the
-// dependency on the plugin's API explicit at this module boundary.
 
 export interface CanvasControllerOptions {
   container: HTMLElement;
@@ -148,6 +138,11 @@ export class CanvasController {
    * the controller's internal maps.
    */
   private renderListeners = new Set<(snap: MinimapSnapshot) => void>();
+  private lastEmittedSnapshot: MinimapSnapshot | null = null;
+  private lastMinimapCameraX = 0;
+  private lastMinimapCameraY = 0;
+  private lastMinimapZoom = 1;
+  private endpointIndex = new Map<ItemId, Set<ItemId>>();
   private activeToolName: string = 'select';
   private activeMode: string = getAllModes()[0]?.id ?? 'grid';
 
@@ -249,13 +244,18 @@ export class CanvasController {
   }
 
   private async init(): Promise<void> {
+    extensions.add(CullerPlugin);
     const app = new Application();
     await app.init({
       background: 0x0f1115,
-      antialias: true,
+      antialias: false,
       resizeTo: this.opts.container,
       autoDensity: true,
       preference: 'webgl',
+      gcActive: true,
+      gcMaxUnusedTime: 120_000,
+      gcFrequency: 60_000,
+      powerPreference: 'high-performance',
     });
     // If destroy() ran while init() was awaiting (React StrictMode
     // double-mount), abort: the app instance is being torn down.
@@ -341,22 +341,23 @@ export class CanvasController {
       if (!this.items.has(id)) this.addItem(item);
       else this.updateItem(id, item);
     }
-    this.notifyRender();
+    this.emitMinimap();
   }
 
   addItem(item: BoardItem): void {
     this.items.set(item.id, item);
     this.index.insert(item, layerKindFor(item.type));
+    this.indexConnector(item.id, item);
     const display = this.renderItemDisplay(item);
     this.addItemToLayer(display, item);
     this.displayById.set(item.id, display);
     // Track last valid bounds
     this.lastValidBounds.set(item.id, { x: item.x, y: item.y, width: item.width, height: item.height });
-    this.notifyRender();
+    this.emitMinimap();
   }
 
   /**
-   * Track the outer-most mutation call. `notifyRender` is only
+   * Track the outer-most mutation call. `emitMinimap` is only
    * invoked when the depth returns to 0, so chained calls
    * (connector re-renders, dangling-flag fan-out) coalesce into a
    * single minimap push per user interaction.
@@ -365,7 +366,49 @@ export class CanvasController {
 
   private endMutation(): void {
     this.mutationDepth--;
-    if (this.mutationDepth === 0) this.notifyRender();
+    if (this.mutationDepth === 0) this.emitMinimap();
+  }
+
+  private shallowAttrsEqual(a: unknown, b: unknown): boolean {
+    if (a === b) return true;
+    if (!a || !b) return false;
+    if (typeof a !== 'object' || typeof b !== 'object') return false;
+    const ak = Object.keys(a as object);
+    const bk = Object.keys(b as object);
+    if (ak.length !== bk.length) return false;
+    for (const k of ak) {
+      if ((a as Record<string, unknown>)[k] !== (b as Record<string, unknown>)[k]) return false;
+    }
+    return true;
+  }
+
+  private indexConnector(id: ItemId, item: BoardItem): void {
+    if (item.type !== 'connector') return;
+    const attrs = item.attrs as { from?: string; to?: string };
+    for (const ep of [attrs.from, attrs.to]) {
+      if (!ep) continue;
+      const epId = asItemId(ep);
+      let s = this.endpointIndex.get(epId);
+      if (!s) {
+        s = new Set();
+        this.endpointIndex.set(epId, s);
+      }
+      s.add(id);
+    }
+  }
+
+  private unindexConnector(id: ItemId, item: BoardItem): void {
+    if (item.type !== 'connector') return;
+    const attrs = item.attrs as { from?: string; to?: string };
+    for (const ep of [attrs.from, attrs.to]) {
+      if (!ep) continue;
+      const epId = asItemId(ep);
+      const s = this.endpointIndex.get(epId);
+      if (s) {
+        s.delete(id);
+        if (s.size === 0) this.endpointIndex.delete(epId);
+      }
+    }
   }
 
   updateItem(id: string | ItemId, partial: Partial<BoardItem> | BoardItem): void {
@@ -380,48 +423,55 @@ export class CanvasController {
       'id' in partial && partial.id === idItem
         ? (partial as BoardItem)
         : ({ ...prev, ...(partial as Partial<BoardItem>) } as BoardItem);
+
+    // Re-index connector endpoints if attrs changed
+    if (prev.type === 'connector' || next.type === 'connector') {
+      const prevAttrs = prev.attrs as { from?: string; to?: string };
+      const nextAttrs = next.attrs as { from?: string; to?: string };
+      if (prevAttrs.from !== nextAttrs.from || prevAttrs.to !== nextAttrs.to) {
+        this.unindexConnector(idItem, prev);
+        this.indexConnector(idItem, next);
+      }
+    }
+
     this.items.set(idItem, next);
     this.index.update(next, layerKindFor(next.type));
 
-    // Remove old display from its layer
+    // Detect: did anything besides x/y/width/height change?
+    const isTransformOnly =
+      next.type === prev.type &&
+      next.layerId === prev.layerId &&
+      next.rotation === prev.rotation &&
+      next.zIndex === prev.zIndex &&
+      this.shallowAttrsEqual(prev.attrs, next.attrs);
+
     const oldDisplay = this.displayById.get(idItem);
-    if (oldDisplay) {
-      const oldKind = layerKindFor(prev.type);
-      const oldLayer = this.layerContainers.get(oldKind);
-      if (oldLayer) oldLayer.removeChild(oldDisplay);
-      oldDisplay.destroy({ children: true });
+    if (isTransformOnly && oldDisplay) {
+      // FAST PATH: mutate in place
+      oldDisplay.position.set(next.x, next.y);
+    } else {
+      // SLOW PATH: full rebuild
+      if (oldDisplay) {
+        const oldKind = layerKindFor(prev.type);
+        const oldLayer = this.layerContainers.get(oldKind);
+        if (oldLayer) oldLayer.removeChild(oldDisplay);
+        oldDisplay.destroy({ children: true });
+      }
+      const fresh = this.renderItemDisplay(next);
+      fresh.position.set(next.x, next.y);
+      this.addItemToLayer(fresh, next);
+      this.displayById.set(idItem, fresh);
     }
 
-    // Create fresh display on the correct layer
-    const fresh = this.renderItemDisplay(next);
-    fresh.position.set(next.x, next.y);
-    this.addItemToLayer(fresh, next);
-    this.displayById.set(idItem, fresh);
-
-    // Endpoint tracking: if any connector references this item, its
-    // rendered path needs to follow the new position. Re-render the
-    // connector by calling `updateItem` with the current item. The
-    // existing `updateItem` flow already handles spatial index
-    // updates and display replacement — we just need to make sure
-    // the connector's `x`/`y`/`width`/`height` are recomputed from
-    // the new endpoint positions.
-    //
-    // We use the connector's stored bounds as a no-op partial so the
-    // connector is rebuilt. `getConnectorBounds` is called inside
-    // `renderConnector` (via `renderItemDisplay`) so the visual path
-    // is correct, and the spatial index is updated with whatever
-    // bounds the connector currently has. The bounds may be slightly
-    // stale for one frame if the connector's x/y was the old bounds,
-    // but on the next frame after the endpoint move the connector
-    // will re-render and pick up the new positions.
-    for (const [otherId, otherItem] of this.items) {
-      if (otherId === idItem) continue;
-      if (otherItem.type !== 'connector') continue;
-      const otherAttrs = otherItem.attrs as { from?: string; to?: string };
-      if (otherAttrs.from !== idItem && otherAttrs.to !== idItem) continue;
-      // Recompute connector's bounds and update display.
-      const connector = otherItem;
-      this.updateItem(otherId, connector);
+    // Endpoint tracking: use the endpoint index to find connectors
+    // that reference this item, and re-render them.
+    const connectors = this.endpointIndex.get(idItem);
+    if (connectors && connectors.size > 0) {
+      for (const otherId of connectors) {
+        const otherItem = this.items.get(otherId);
+        if (!otherItem || otherItem.type !== 'connector') continue;
+        this.updateItem(otherId, otherItem);
+      }
     }
     this.endMutation();
   }
@@ -431,6 +481,9 @@ export class CanvasController {
     const idItem = asItemId(String(id));
     this.index.remove(idItem);
     const item = this.items.get(idItem);
+    if (item) {
+      this.unindexConnector(idItem, item);
+    }
     this.items.delete(idItem);
     const display = this.displayById.get(idItem);
     if (display && item) {
@@ -454,15 +507,18 @@ export class CanvasController {
     // dangling connector. The dangling flag is set in the controller's
     // local state and the new item is sent through the adapter's
     // onItemChange so it propagates to other collaborators.
-    for (const [otherId, otherItem] of this.items) {
-      if (otherItem.type !== 'connector') continue;
-      const otherAttrs = otherItem.attrs as { from?: string; to?: string; dangling?: boolean };
-      if (otherAttrs.from !== idItem && otherAttrs.to !== idItem) continue;
-      if (otherAttrs.dangling) continue; // already dangling
-      const nextAttrs = { ...otherItem.attrs, dangling: true };
-      const nextConnector = { ...otherItem, attrs: nextAttrs } as BoardItem;
-      this.updateItem(otherId, nextConnector);
-      this.opts.onItemChange({ id: otherId, partial: { attrs: nextAttrs } });
+    const connectors = this.endpointIndex.get(idItem);
+    if (connectors && connectors.size > 0) {
+      for (const otherId of connectors) {
+        const otherItem = this.items.get(otherId);
+        if (!otherItem || otherItem.type !== 'connector') continue;
+        const otherAttrs = otherItem.attrs as { from?: string; to?: string; dangling?: boolean };
+        if (otherAttrs.dangling) continue; // already dangling
+        const nextAttrs = { ...otherItem.attrs, dangling: true };
+        const nextConnector = { ...otherItem, attrs: nextAttrs } as BoardItem;
+        this.updateItem(otherId, nextConnector);
+        this.opts.onItemChange({ id: otherId, partial: { attrs: nextAttrs } });
+      }
     }
     this.endMutation();
   }
@@ -673,6 +729,38 @@ export class CanvasController {
     };
   }
 
+  /**
+   * React-friendly minimap subscription. Uses the same renderListeners
+   * set as `onRender` but the listener is called with no arguments —
+   * consumers call `getMinimapSnapshot()` to read the latest snapshot.
+   * Returns an unsubscribe function.
+   */
+  subscribeMinimap(listener: () => void): () => void {
+    this.renderListeners.add(listener as unknown as (snap: MinimapSnapshot) => void);
+    // Push the initial snapshot when one exists, so listeners can paint
+    // immediately.
+    const initial = this.lastEmittedSnapshot;
+    if (initial) {
+      queueMicrotask(() => {
+        if (this.renderListeners.has(listener as unknown as (snap: MinimapSnapshot) => void)) {
+          listener();
+        }
+      });
+    }
+    return () => {
+      this.renderListeners.delete(listener as unknown as (snap: MinimapSnapshot) => void);
+    };
+  }
+
+  /**
+   * Return the last emitted minimap snapshot, or null if none has been
+   * emitted yet. The reference is stable between emits — consumers can
+   * use `Object.is` to detect changes.
+   */
+  getMinimapSnapshot(): MinimapSnapshot | null {
+    return this.lastEmittedSnapshot;
+  }
+
   /** Build a snapshot of items + camera for minimap consumers. */
   private buildMinimapSnapshot(): MinimapSnapshot {
     const items: MinimapItemSnapshot[] = [];
@@ -694,10 +782,24 @@ export class CanvasController {
   }
 
   /** Push the current snapshot to all render listeners. */
-  private notifyRender(): void {
-    if (this.renderListeners.size === 0) return;
+  private emitMinimap(): void {
     const snap = this.buildMinimapSnapshot();
+    this.lastEmittedSnapshot = snap;
+    this.lastMinimapCameraX = this.camera.x;
+    this.lastMinimapCameraY = this.camera.y;
+    this.lastMinimapZoom = this.camera.zoom;
     for (const listener of this.renderListeners) listener(snap);
+  }
+
+  /**
+   * Returns true if the minimap snapshot should be re-emitted because
+   * the camera moved more than 0.5 board units or the zoom changed.
+   */
+  private shouldEmitMinimap(): boolean {
+    if (this.camera.zoom !== this.lastMinimapZoom) return true;
+    const dx = Math.abs(this.camera.x - this.lastMinimapCameraX);
+    const dy = Math.abs(this.camera.y - this.lastMinimapCameraY);
+    return dx + dy > 0.5;
   }
 
   setZoom(zoom: number, around?: Point): void {
@@ -1227,10 +1329,6 @@ export class CanvasController {
   private cameraRafScheduled = false;
   /** Track the last zoom we did a full cull for. */
   private cullZoom = -1;
-  /** Track the last camera x/y we notified the minimap with. */
-  private lastNotifiedCameraX = NaN;
-  private lastNotifiedCameraY = NaN;
-  private lastNotifiedCameraZ = NaN;
 
   private scheduleCameraFlush(
     opts: { redrawGrid: 'always' | 'when-dirty' | 'never' } = { redrawGrid: 'never' },
@@ -1280,15 +1378,8 @@ export class CanvasController {
       // Pure pan: the camera x/y changed, so the viewport rect
       // moves — notify. Zoom: the zoom changed — notify. Same
       // camera state as last time: skip.
-      if (
-        this.camera.x !== this.lastNotifiedCameraX ||
-        this.camera.y !== this.lastNotifiedCameraY ||
-        this.camera.zoom !== this.lastNotifiedCameraZ
-      ) {
-        this.lastNotifiedCameraX = this.camera.x;
-        this.lastNotifiedCameraY = this.camera.y;
-        this.lastNotifiedCameraZ = this.camera.zoom;
-        this.notifyRender();
+      if (this.shouldEmitMinimap()) {
+        this.emitMinimap();
       }
     };
     if (typeof requestAnimationFrame === 'function') {

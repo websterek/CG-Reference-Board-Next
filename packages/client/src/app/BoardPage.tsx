@@ -13,14 +13,14 @@
  * positioned on top of it with translucent surfaces and soft borders.
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { useParams } from 'react-router-dom';
 import { ModeTabs } from '../ui/ModeTabs';
 import { ToolsToolbar, type ToolToolbarAction } from '../ui/ToolsToolbar';
 import { UserPanel } from '../ui/UserPanel';
 import { MinimapPanel } from '../ui/MinimapPanel';
 import type { MinimapItem } from '../ui/MinimapPanel';
-import { CanvasController, type MinimapSnapshot } from '../canvas/controller';
+import { CanvasController } from '../canvas/controller';
 import { YjsBoardAdapter, type RemoteUpdate } from '../collab/YjsBoardAdapter';
 import { HocuspocusProvider } from '@hocuspocus/provider';
 import { useUIStore } from '../state/uiStore';
@@ -31,13 +31,29 @@ export function BoardPage() {
   const params = useParams<{ id: string }>();
   const id = params.id ?? '';
   const containerRef = useRef<HTMLDivElement>(null);
+  // The controller is created in useEffect below, but useSyncExternalStore
+  // wires its subscription on the first render — when the ref would still
+  // be null. We use a state slot to force a re-render when the controller
+  // appears, so useSyncExternalStore rebinds with a non-null controller.
+  // The ref is kept for cleanup paths (e.g. controller.destroy()).
   const controllerRef = useRef<CanvasController | null>(null);
+  const [controller, setController] = useState<CanvasController | null>(null);
   const adapterRef = useRef<YjsBoardAdapter | null>(null);
   const providerRef = useRef<HocuspocusProvider | null>(null);
   const [connected, setConnected] = useState(false);
   const [role, setRole] = useState<string>('unknown');
   const [userName, setUserName] = useState<string | undefined>(undefined);
-  const [minimap, setMinimap] = useState<MinimapSnapshot | null>(null);
+
+  const subscribeMinimap = useCallback(
+    (cb: () => void) =>
+      controller?.subscribeMinimap(cb) ?? (() => {}),
+    [controller],
+  );
+  const getMinimapSnapshot = useCallback(
+    () => controller?.getMinimapSnapshot() ?? null,
+    [controller],
+  );
+  const minimap = useSyncExternalStore(subscribeMinimap, getMinimapSnapshot);
 
   useEffect(() => {
     if (!id || !containerRef.current) return;
@@ -66,6 +82,7 @@ export function BoardPage() {
       onItemCreate: (add) => adapter.createLocal(add.item),
     });
     controllerRef.current = controller;
+    setController(controller);
 
     const onRemote = (u: RemoteUpdate) => {
       controller.applyRemoteUpdate(u.id, u.partial);
@@ -101,17 +118,13 @@ export function BoardPage() {
       setRole('anon');
     }
 
-    // Subscribe to minimap snapshots. The controller pushes after
-    // every item/camera change.
-    const unsubscribe = controller.onRender(setMinimap);
-
     return () => {
-      unsubscribe();
       provider.destroy();
       controller.destroy();
       providerRef.current = null;
       adapterRef.current = null;
       controllerRef.current = null;
+      setController(null);
     };
   }, [id]);
 

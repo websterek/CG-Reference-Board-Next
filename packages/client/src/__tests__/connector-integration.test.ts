@@ -65,15 +65,14 @@ describe('14.2: connector renderer draws path between endpoints', () => {
 // ---------------------------------------------------------------------------
 
 describe('14.3/14.4: connector re-renders when endpoint items move', () => {
-  it('updateItem finds connectors referencing the updated item and re-renders them', () => {
+  it('updateItem finds connectors via endpointIndex and re-renders them', () => {
     const src = readController();
-    // The endpoint-tracking block in updateItem iterates this.items
-    // and finds connectors whose attrs.from or attrs.to matches the
-    // updated item ID, then calls updateItem on them.
+    // The endpoint-tracking block in updateItem uses the endpointIndex
+    // to find connectors referencing the updated item, then calls
+    // updateItem on them.
+    expect(src).toMatch(/endpointIndex\.get\(idItem\)/);
     expect(src).toMatch(/otherItem\.type !== 'connector'/);
-    expect(src).toMatch(/otherAttrs\.from !== idItem/);
-    expect(src).toMatch(/otherAttrs\.to !== idItem/);
-    expect(src).toMatch(/this\.updateItem\(otherId, connector\)/);
+    expect(src).toMatch(/this\.updateItem\(otherId, otherItem\)/);
   });
 });
 
