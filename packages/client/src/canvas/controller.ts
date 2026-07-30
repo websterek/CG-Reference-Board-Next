@@ -49,6 +49,13 @@ import {
   getToolDef,
   type ToolDefinition,
 } from './tools';
+import {
+  type PlacementState,
+  createInitialPlacementState,
+  updatePlacementState,
+  makeInvalidPlacement,
+  hasInvalidReason,
+} from './placement-state';
 
 // Touch CullerPlugin so the bundler keeps it in the import graph; the
 // PixiJS v8 Application.init({ preference, ... }) handles registration
@@ -85,6 +92,12 @@ export class CanvasController {
   private toolOverlay: Container | null = null;
   private gridGraphics: Graphics | null = null;
   private gridLayer: Container | null = null;
+  /**
+   * Ghost preview layer (above items, below selection). Holds the
+   * translucent ghost that previews an in-progress drag/nudge at the
+   * proposed position. See `invalid-placement-ux` proposal D1–D2.
+   */
+  private ghostLayer: Container | null = null;
 
   private index = new SpatialIndex();
   private items = new Map<ItemId, BoardItem>();
@@ -112,6 +125,20 @@ export class CanvasController {
    * durable store if HMR / navigation becomes a real problem in practice.
    */
   private lastValidBounds = new Map<ItemId, Rect>();
+
+  /**
+   * Per-item in-progress placement state, controller-local ephemeral.
+   * `invalid-placement-ux` proposal D1: NOT in Yjs, NOT in Zustand.
+   * Created on drag/nudge start, updated every pointermove, cleared on
+   * drag end. See `placement-state.ts`.
+   */
+  private placementStates = new Map<ItemId, PlacementState>();
+
+  /**
+   * Map of per-item ghost PixiJS containers currently rendered on the
+   * `ghostLayer`. Keyed by ItemId. Cleared on drag end (clearGhost).
+   */
+  private ghostGraphics = new Map<ItemId, Graphics>();
 
   /**
    * Buffered per-item coordinate updates (single-slot per item ID, see
@@ -219,7 +246,15 @@ export class CanvasController {
       world.addChild(container);
     }
 
-    // Selection handles (above items)
+    // Ghost preview layer. Sits above items (so the ghost is visible
+    // over same-layer items during drag). Children are added on demand
+    // by `renderGhost`. Added BEFORE the selection layer so that
+    // selection/resize handles render on top of the ghost.
+    this.ghostLayer = new Container();
+    world.addChild(this.ghostLayer);
+
+    // Selection handles (above items AND above the ghost preview so
+    // resize/selection handles remain visible during drag).
     this.selectionLayer = new Container();
     world.addChild(this.selectionLayer);
 
@@ -366,9 +401,82 @@ export class CanvasController {
 
   // ----- Selection / Mutations from outside -----
 
-  /** Called by the adapter for remote updates. */
+  /**
+   * Called by the adapter for remote updates. After applying the update
+   * locally, run `GridService.canPlace` and:
+   *   - If valid: update `lastValidBounds` to the new bounds.
+   *   - If invalid: revert the item back to its `lastValidBounds` and
+   *     emit a corrected write via `opts.onItemChange`.
+   *
+   * Section 8.2: this auto-revert is suppressed when the user is
+   * actively dragging or resizing — the local user has the "last
+   * word" and the ghost preview handles their feedback.
+   */
   applyRemoteUpdate(id: string, partial: Partial<BoardItem>): void {
+    const idItem = asItemId(String(id));
+
+    // Suppress auto-revert during a user drag/resize — Section 8.2.
+    const userIsDragging =
+      (this.dragState !== null &&
+        (this.dragState.kind === 'move-selected' ||
+          this.dragState.kind === 'draw-rect')) ||
+      this.resizeState !== null;
+    if (userIsDragging) {
+      this.updateItem(id, partial);
+      return;
+    }
+
+    // Apply first so we can read the resulting bounds.
     this.updateItem(id, partial);
+    const updated = this.items.get(idItem);
+    if (!updated) return;
+
+    // Only the position/size dimensions matter for canPlace.
+    const proposed = {
+      x: updated.x,
+      y: updated.y,
+      width: updated.width,
+      height: updated.height,
+    };
+    const kind = layerKindFor(updated.type);
+    const itemsList = this.buildCanPlaceItems(proposed, kind, idItem);
+    const placeable = GridService.canPlace(proposed, itemsList, kind, idItem);
+
+    if (placeable) {
+      // Section 8.1: valid → update lastValidBounds, no correction.
+      this.lastValidBounds.set(idItem, {
+        x: updated.x,
+        y: updated.y,
+        width: updated.width,
+        height: updated.height,
+      });
+      return;
+    }
+
+    // Invalid overlap caused by remote write — auto-revert.
+    const lastValid = this.lastValidBounds.get(idItem);
+    if (!lastValid) {
+      // No revert target available (controller-local map empty —
+      // see Bug #15 caveat). Skip the correction; the next local
+      // interaction will repopulate lastValidBounds.
+      return;
+    }
+    this.updateItem(idItem, {
+      x: lastValid.x,
+      y: lastValid.y,
+      width: lastValid.width,
+      height: lastValid.height,
+    });
+    // Emit corrected write so other peers converge.
+    this.opts.onItemChange({
+      id,
+      partial: {
+        x: lastValid.x,
+        y: lastValid.y,
+        width: lastValid.width,
+        height: lastValid.height,
+      },
+    });
   }
 
   applyToolbarAction(action: ToolbarAction): void {
@@ -535,6 +643,9 @@ export class CanvasController {
     this.gridLayer = null;
     this.gridGraphics = null;
     this.toolOverlay = null;
+    this.ghostLayer = null;
+    this.ghostGraphics.clear();
+    this.placementStates.clear();
     this.selectionLayer = null;
   }
 
@@ -655,52 +766,131 @@ export class CanvasController {
   }
 
   // ----- Rejection feedback -----
+  // ----- PlacementState helpers (Section 1.4) -----
 
   /**
-   * Draw a red outline on the given item for 200ms, then remove it.
-   * Used to signal that a move/resize/create was rejected due to overlap.
-   *
-   * Bug #4: 200ms flash-and-revert UX — fixed by `invalid-placement-ux` proposal.
-   * The current behavior flashes on rejection but does not animate revert;
-   * the dedicated proposal upgrades the visual UX and adds ARIA feedback.
+   * Get the current PlacementState for an item, if any.
    */
-  private flashRejection(id: ItemId): void {
-    const item = this.items.get(id);
-    if (!item || !this.selectionLayer) return;
-
-    const g = new Graphics();
-    g.setStrokeStyle({ width: 2, color: 0xff0000, alpha: 1 });
-    g.rect(item.x, item.y, item.width, item.height);
-    g.stroke();
-    this.selectionLayer.addChild(g);
-
-    setTimeout(() => {
-      if (this.selectionLayer) {
-        this.selectionLayer.removeChild(g);
-        g.destroy();
-      }
-    }, 200);
+  getPlacementState(id: ItemId): PlacementState | undefined {
+    return this.placementStates.get(id);
   }
 
   /**
-   * Draw a red outline at an arbitrary rect for 200ms (used when there's no
-   * item to flash, e.g. rejected creation preview).
+   * Set / replace the PlacementState for an item. Caller is responsible
+   * for triggering any ghost re-render.
    */
-  private flashRejectionRect(rect: Rect): void {
-    if (!this.selectionLayer) return;
+  setPlacementState(id: ItemId, state: PlacementState): void {
+    this.placementStates.set(id, state);
+  }
 
-    const g = new Graphics();
-    g.setStrokeStyle({ width: 2, color: 0xff0000, alpha: 1 });
-    g.rect(rect.x, rect.y, rect.width, rect.height);
-    g.stroke();
-    this.selectionLayer.addChild(g);
+  /**
+   * Remove any PlacementState and ghost for an item. Safe to call when
+   * no state exists.
+   */
+  clearPlacementState(id: ItemId): void {
+    this.placementStates.delete(id);
+    this.clearGhost(id);
+  }
 
-    setTimeout(() => {
-      if (this.selectionLayer) {
-        this.selectionLayer.removeChild(g);
-        g.destroy();
-      }
-    }, 200);
+  /**
+   * Clear all PlacementStates and ghosts. Used on selection change and
+   * in `destroy()` to ensure no stale state survives.
+   */
+  clearAllPlacementStates(): void {
+    this.placementStates.clear();
+    for (const id of [...this.ghostGraphics.keys()]) {
+      this.clearGhost(id);
+    }
+  }
+
+  // ----- Ghost preview rendering (Section 2) -----
+
+  /**
+   * Render a translucent ghost at the proposed bounds for the item.
+   * Reads `PlacementState` from `placementStates`; if none exists the
+   * call is a no-op (clears any leftover ghost).
+   *
+   * Style (Section 2.2 / 4.1):
+   *   - valid:   outline (alpha 0.5) + fill (alpha 0.5)
+   *   - invalid: red outline (#ff0000 alpha 1.0) + 30% red fill
+   *     (D3 — all non-undefined reasons map to red in v1; the
+   *     color-selection switch below is structured so future
+   *     multi-color encoding is a one-line change.)
+   */
+  renderGhost(id: ItemId): void {
+    const state = this.placementStates.get(id);
+    if (!state || !this.ghostLayer) {
+      // No active placement state — make sure any stale ghost is cleared
+      this.clearGhost(id);
+      return;
+    }
+    // The PlacementState's `proposedBounds` carries both the rect and
+    // its size, so the ghost renders correctly even when the item
+    // itself does not (yet) exist (e.g. the rectangle-tool creation
+    // preview, which uses a synthetic id).
+    const item = this.items.get(id);
+    const idStr = String(id);
+    if (!item && idStr.startsWith('__create-preview__')) {
+      // OK: render from bounds alone.
+    } else if (!item) {
+      this.clearGhost(id);
+      return;
+    }
+
+    // Reuse existing Graphics if present, otherwise create a new one.
+    let g = this.ghostGraphics.get(id);
+    if (!g) {
+      g = new Graphics();
+      this.ghostLayer.addChild(g);
+      this.ghostGraphics.set(id, g);
+    } else {
+      g.clear();
+    }
+
+    const { x, y, width, height } = state.proposedBounds;
+
+    // v1 color map: all non-undefined reasons → red (#ff0000). The
+    // structure of this switch means future multi-color encoding
+    // (red=overlap, amber=containment, magenta=both) is a one-line
+    // change — no controller logic changes.
+    const isInvalid =
+      state.state === 'invalid' && hasInvalidReason(state);
+
+    if (isInvalid) {
+      // Persistent red marker (no setTimeout, see Section 4.3).
+      const redFill = 0xff0000;
+      const redFillAlpha = 0.3;
+      const strokeAlpha = 1.0;
+      g.setFillStyle({ color: redFill, alpha: redFillAlpha });
+      g.rect(x, y, width, height);
+      g.fill();
+      g.setStrokeStyle({ width: 2, color: redFill, alpha: strokeAlpha });
+      g.rect(x, y, width, height);
+      g.stroke();
+    } else {
+      // Valid placement: translucent ghost at the proposed position.
+      const fillAlpha = 0.5;
+      const strokeAlpha = 0.5;
+      // White fill (visible over dark and light board) at low alpha.
+      g.setFillStyle({ color: 0xffffff, alpha: fillAlpha });
+      g.rect(x, y, width, height);
+      g.fill();
+      g.setStrokeStyle({ width: 1, color: 0xffffff, alpha: strokeAlpha });
+      g.rect(x, y, width, height);
+      g.stroke();
+    }
+  }
+
+  /**
+   * Remove the ghost graphics for an item from the ghostLayer and
+   * destroy it. Safe to call when no ghost exists for the item.
+   */
+  clearGhost(id: ItemId): void {
+    const g = this.ghostGraphics.get(id);
+    if (!g) return;
+    if (this.ghostLayer) this.ghostLayer.removeChild(g);
+    g.destroy();
+    this.ghostGraphics.delete(id);
   }
 
   // ----- Resize handles -----
@@ -1036,9 +1226,27 @@ export class CanvasController {
           const kind = layerKindFor(item.type);
           const itemsList = this.buildCanPlaceItems(proposed, kind, id);
           if (!GridService.canPlace(proposed, itemsList, kind, id)) {
-            this.flashRejection(id);
+            // Section 7.1: invalid nudge → do NOT move the item.
+            // Create / update PlacementState with the attempted bounds
+            // and render the red ghost there. The marker persists
+            // until the user nudges into a valid cell or selection
+            // changes (Section 7.3).
+            const currentBounds: Rect = {
+              x: item.x,
+              y: item.y,
+              width: item.width,
+              height: item.height,
+            };
+            this.setPlacementState(
+              id,
+              makeInvalidPlacement(currentBounds, proposed, 'overlap'),
+            );
+            this.renderGhost(id);
             continue;
           }
+          // Section 7.2: valid nudge — clear any prior nudge ghost
+          // before moving.
+          this.clearPlacementState(id);
           const nx = proposed.x;
           const ny = proposed.y;
           this.updateItem(id, { x: nx, y: ny });
@@ -1150,12 +1358,25 @@ export class CanvasController {
               startBoard: boardPt,
               startBounds: { x: item.x, y: item.y, width: item.width, height: item.height },
             };
+            // Section 3.1: also create initial PlacementState for resize.
+            this.setPlacementState(
+              hit,
+              createInitialPlacementState({
+                x: item.x,
+                y: item.y,
+                width: item.width,
+                height: item.height,
+              }),
+            );
             return;
           }
         }
       }
 
       if (this.activeToolName === 'rectangle') {
+        // Clear leftover create-preview ghosts before validating a new
+        // creation attempt.
+        this.clearAllPlacementStates();
         const snappedStart = this.snapPoint(boardPt);
         const proposed: Rect = {
           x: snappedStart.x,
@@ -1166,7 +1387,19 @@ export class CanvasController {
         const kind = layerKindFor('rectangle');
         const itemsList = this.buildCanPlaceItems(proposed, kind);
         if (!GridService.canPlace(proposed, itemsList, kind)) {
-          this.flashRejectionRect(proposed);
+          // Section 10.3: flashRejectionRect was removed. Render a
+          // persistent red ghost at the attempted creation rect so the
+          // user sees the rejected position. The synthetic key keeps it
+          // isolated from real item IDs; it is cleared on next pointer
+          // down or selection change.
+          const syntheticId = asItemId(
+            `__create-preview__${snappedStart.x}_${snappedStart.y}`,
+          );
+          this.setPlacementState(
+            syntheticId,
+            makeInvalidPlacement(proposed, proposed, 'overlap'),
+          );
+          this.renderGhost(syntheticId);
           return;
         }
         const newId = asItemId(crypto.randomUUID());
@@ -1184,6 +1417,16 @@ export class CanvasController {
         this.addItem(newItem);
         this.opts.onItemCreate({ item: newItem });
         this.dragState = { kind: 'draw-rect', startBoard: snappedStart, id: newId };
+        // Section 3.1: create initial PlacementState for the draw-rect item.
+        this.setPlacementState(
+          newId,
+          createInitialPlacementState({
+            x: newItem.x,
+            y: newItem.y,
+            width: newItem.width,
+            height: newItem.height,
+          }),
+        );
         return;
       }
 
@@ -1202,8 +1445,26 @@ export class CanvasController {
           if (it) startPositions.set(id, { x: it.x, y: it.y });
         }
         this.dragState = { kind: 'move-selected', startBoard: boardPt, startPositions };
+        // Section 3.1: create initial PlacementState per dragged item.
+        for (const id of this.selection) {
+          const it = this.items.get(id);
+          if (!it) continue;
+          this.setPlacementState(
+            id,
+            createInitialPlacementState({
+              x: it.x,
+              y: it.y,
+              width: it.width,
+              height: it.height,
+            }),
+          );
+        }
       } else {
-        if (!e.shiftKey) this.selection = new Set();
+        if (!e.shiftKey) {
+          // Section 7.3: clear nudge ghosts when selection is cleared.
+          this.clearAllPlacementStates();
+          this.selection = new Set();
+        }
       }
       this.renderSelection();
     });
@@ -1280,28 +1541,32 @@ export class CanvasController {
         );
         const kind = layerKindFor(item.type);
         const itemsList = this.buildCanPlaceItems(proposed, kind, rs.itemId);
+        const placeable = GridService.canPlace(proposed, itemsList, kind, rs.itemId);
 
-        if (!GridService.canPlace(proposed, itemsList, kind, rs.itemId)) {
-          // Revert to last valid bounds
-          const lastValid = this.lastValidBounds.get(rs.itemId);
-          if (lastValid) {
-            this.updateItem(rs.itemId, {
-              x: lastValid.x,
-              y: lastValid.y,
-              width: lastValid.width,
-              height: lastValid.height,
-            });
-          }
-          this.flashRejection(rs.itemId);
-          return;
+        // Section 3.3 + 5.3: do NOT revert during resize. Only update
+        // PlacementState + render the ghost at the proposed rect. The
+        // real item stays at its last valid bounds until `endDrag`
+        // commits a valid placement.
+        const prev = this.getPlacementState(rs.itemId);
+        if (prev) {
+          this.setPlacementState(
+            rs.itemId,
+            updatePlacementState(prev, proposed, placeable),
+          );
+          this.renderGhost(rs.itemId);
         }
 
-        this.updateItem(rs.itemId, {
-          x: proposed.x,
-          y: proposed.y,
-          width: proposed.width,
-          height: proposed.height,
-        });
+        // Commit incrementally when valid so the user sees the resize
+        // follow the pointer; on invalid moves we skip the update so
+        // the item retains its last valid bounds.
+        if (placeable) {
+          this.updateItem(rs.itemId, {
+            x: proposed.x,
+            y: proposed.y,
+            width: proposed.width,
+            height: proposed.height,
+          });
+        }
         this.renderSelection();
         return;
       }
@@ -1336,28 +1601,28 @@ export class CanvasController {
         const drawItem = this.items.get(this.dragState.id);
         const kind = drawItem ? layerKindFor(drawItem.type) : ('media' as LayerKind);
         const itemsList = this.buildCanPlaceItems(proposed, kind, this.dragState.id);
-        if (!GridService.canPlace(proposed, itemsList, kind, this.dragState.id)) {
-          // Revert to last valid bounds for this draw-rect item
-          const lastValid = this.lastValidBounds.get(this.dragState.id);
-          if (lastValid && drawItem) {
-            this.updateItem(this.dragState.id, {
-              x: lastValid.x,
-              y: lastValid.y,
-              width: lastValid.width,
-              height: lastValid.height,
-            });
-          }
-          this.flashRejection(this.dragState.id);
-          return;
+        const placeable = GridService.canPlace(proposed, itemsList, kind, this.dragState.id);
+
+        // Section 3.4: update PlacementState + render ghost. Do NOT
+        // move the real item when invalid (no revert-during-drag).
+        const prev = this.getPlacementState(this.dragState.id);
+        if (prev) {
+          this.setPlacementState(
+            this.dragState.id,
+            updatePlacementState(prev, proposed, placeable),
+          );
+          this.renderGhost(this.dragState.id);
         }
-        this.updateItem(this.dragState.id, { x: snapped.x, y: snapped.y, width: sw, height: sh });
-        // Track last valid bounds on acceptance
-        this.lastValidBounds.set(this.dragState.id, {
-          x: snapped.x,
-          y: snapped.y,
-          width: sw,
-          height: sh,
-        });
+        if (placeable) {
+          this.updateItem(this.dragState.id, { x: snapped.x, y: snapped.y, width: sw, height: sh });
+          // Track last valid bounds on acceptance
+          this.lastValidBounds.set(this.dragState.id, {
+            x: snapped.x,
+            y: snapped.y,
+            width: sw,
+            height: sh,
+          });
+        }
         return;
       }
 
@@ -1374,9 +1639,99 @@ export class CanvasController {
           );
           const kind = layerKindFor(item.type);
           const itemsList = this.buildCanPlaceItems(proposed, kind, id);
+          const placeable = GridService.canPlace(proposed, itemsList, kind, id);
 
-          if (!GridService.canPlace(proposed, itemsList, kind, id)) {
-            // Revert to last valid bounds
+          // Section 3.2 + 5.2: do NOT revert during drag. Only update
+          // PlacementState and the ghost; the real item stays at its
+          // last valid bounds throughout the drag. The item actually
+          // moves only when the pointerup commits in `endDrag`.
+          const prev = this.getPlacementState(id);
+          if (prev) {
+            this.setPlacementState(
+              id,
+              updatePlacementState(prev, proposed, placeable),
+            );
+            this.renderGhost(id);
+          }
+
+          // If the placement is valid, we ALSO commit the move
+          // incrementally on each pointermove so the user sees the
+          // item follow the pointer (this matches the existing v0.1
+          // behavior — items follow the pointer per-frame). The
+          // ghost renders on top with the same bounds, so it appears
+          // as a no-op for valid moves. On invalid moves, the real
+          // item does NOT move because we skip the updateItem below.
+          if (placeable) {
+            this.updateItem(id, { x: proposed.x, y: proposed.y });
+          }
+        }
+        this.renderSelection();
+      }
+    });
+
+    const endDrag = (e?: PointerEvent) => {
+      // `shiftKey` is needed by Section 9 (Shift+release affordance)
+      // and is read ONLY on pointerup here (Section 9.2: do not check
+      // on pointermove).
+      const shiftHeld = !!e?.shiftKey;
+
+      if (this.resizeState) {
+        // Section 5.1 / 9.1: commit if valid; otherwise apply
+        // Shift+release snap or revert to lastValidBounds.
+        const rs = this.resizeState;
+        const state = this.getPlacementState(rs.itemId);
+        if (state && state.state === 'invalid') {
+          const committed = this.tryShiftReleaseSnap(rs.itemId, state, shiftHeld);
+          if (!committed) {
+            // Revert real item to lastValidBounds (it was never moved
+            // because the pointermove handler skips updateItem on
+            // invalid, so this is mostly a no-op safety net).
+            const lastValid = this.lastValidBounds.get(rs.itemId);
+            if (lastValid) {
+              this.updateItem(rs.itemId, {
+                x: lastValid.x,
+                y: lastValid.y,
+                width: lastValid.width,
+                height: lastValid.height,
+              });
+            }
+          }
+        } else if (state && state.state === 'valid') {
+          // Commit valid resize to Yjs.
+          const item = this.items.get(rs.itemId);
+          if (item) {
+            this.opts.onItemChange({
+              id: rs.itemId,
+              partial: {
+                x: item.x,
+                y: item.y,
+                width: item.width,
+                height: item.height,
+              },
+            });
+            this.lastValidBounds.set(rs.itemId, {
+              x: item.x,
+              y: item.y,
+              width: item.width,
+              height: item.height,
+            });
+          }
+        }
+        this.clearPlacementState(rs.itemId);
+        this.resizeState = null;
+        this.renderSelection();
+        return;
+      }
+
+      if (this.dragState?.kind === 'move-selected') {
+        // Section 5.1 / 9.1: per-item check on commit or revert.
+        for (const id of [...this.selection]) {
+          const it = this.items.get(id);
+          if (!it) continue;
+          const state = this.getPlacementState(id);
+          if (state && state.state === 'invalid') {
+            // Revert: real item was never moved on invalid frames, so
+            // restore to lastValidBounds if any exists. Do NOT commit.
             const lastValid = this.lastValidBounds.get(id);
             if (lastValid) {
               this.updateItem(id, {
@@ -1384,61 +1739,69 @@ export class CanvasController {
                 y: lastValid.y,
               });
             }
-            this.flashRejection(id);
+            // Try Shift+release snap if requested.
+            this.tryShiftReleaseSnap(id, state, shiftHeld);
             continue;
           }
-
-          this.updateItem(id, { x: proposed.x, y: proposed.y });
-        }
-        this.renderSelection();
-      }
-    });
-
-    const endDrag = () => {
-      if (this.resizeState) {
-        // Commit resize
-        const rs = this.resizeState;
-        const item = this.items.get(rs.itemId);
-        if (item) {
-          this.opts.onItemChange({
-            id: rs.itemId,
-            partial: { x: item.x, y: item.y, width: item.width, height: item.height },
-          });
-          this.lastValidBounds.set(rs.itemId, {
-            x: item.x,
-            y: item.y,
-            width: item.width,
-            height: item.height,
-          });
-        }
-        this.resizeState = null;
-        this.renderSelection();
-        return;
-      }
-
-      if (this.dragState?.kind === 'move-selected') {
-        // Commit final positions to Yjs
-        for (const id of this.selection) {
-          const it = this.items.get(id);
-          if (!it) continue;
+          // Valid (or no PlacementState — backward compat): commit.
           this.opts.onItemChange({ id, partial: { x: it.x, y: it.y } });
-          this.lastValidBounds.set(id, { x: it.x, y: it.y, width: it.width, height: it.height });
-        }
-        this.renderSelection();
-      } else if (this.dragState?.kind === 'draw-rect') {
-        const it = this.items.get(this.dragState.id);
-        if (it) {
-          this.opts.onItemChange({
-            id: this.dragState.id,
-            partial: { x: it.x, y: it.y, width: it.width, height: it.height },
-          });
-          this.lastValidBounds.set(this.dragState.id, {
+          this.lastValidBounds.set(id, {
             x: it.x,
             y: it.y,
             width: it.width,
             height: it.height,
           });
         }
+        // Clear all placement states + ghosts at drag end (Section 3.5).
+        this.clearAllPlacementStates();
+        this.renderSelection();
+      } else if (this.dragState?.kind === 'draw-rect') {
+        const it = this.items.get(this.dragState.id);
+        if (it) {
+          const state = this.getPlacementState(this.dragState.id);
+          if (state && state.state === 'invalid') {
+            // Invalid: do NOT commit the bad rect. Revert to lastValid
+            // (or, if the item was never accepted, remove it entirely
+            // — the user dragged into an occupied cell from the start).
+            const lastValid = this.lastValidBounds.get(this.dragState.id);
+            if (lastValid) {
+              this.updateItem(this.dragState.id, {
+                x: lastValid.x,
+                y: lastValid.y,
+                width: lastValid.width,
+                height: lastValid.height,
+              });
+              this.opts.onItemChange({
+                id: this.dragState.id,
+                partial: {
+                  x: lastValid.x,
+                  y: lastValid.y,
+                  width: lastValid.width,
+                  height: lastValid.height,
+                },
+              });
+            } else {
+              // No valid placement was ever accepted during the drag —
+              // treat the whole creation as rejected: remove the item
+              // and notify the adapter.
+              this.removeItem(this.dragState.id);
+              this.opts.onItemDelete({ id: this.dragState.id });
+            }
+          } else {
+            // Valid draw-rect: commit final rect.
+            this.opts.onItemChange({
+              id: this.dragState.id,
+              partial: { x: it.x, y: it.y, width: it.width, height: it.height },
+            });
+            this.lastValidBounds.set(this.dragState.id, {
+              x: it.x,
+              y: it.y,
+              width: it.width,
+              height: it.height,
+            });
+          }
+        }
+        this.clearPlacementState(this.dragState.id);
       }
       this.dragState = null;
 
@@ -1467,6 +1830,80 @@ export class CanvasController {
     };
     canvas.addEventListener('pointerup', endDrag);
     canvas.addEventListener('pointerleave', endDrag);
+  }
+
+  // ----- Shift+release affordance (Section 9) -----
+
+  /**
+   * If the user held Shift on pointerup of an invalid drag, attempt to
+   * snap the item to the nearest free cell via `GridService.findFreeCells`.
+   *
+   * Returns true if the snap was applied (and the item committed).
+   * Returns false if Shift was not held, no candidates exist, or the
+   * state is not 'invalid'.
+   *
+   * The real item is updated to the snap target, lastValidBounds is
+   * updated, the Yjs adapter is notified, and the placement state +
+   * ghost are cleared. The caller (endDrag) is then responsible for
+   * the final `renderSelection()` and any remaining cleanup.
+   */
+  private tryShiftReleaseSnap(
+    id: ItemId,
+    state: PlacementState,
+    shiftHeld: boolean,
+  ): boolean {
+    if (!shiftHeld) return false;
+    if (state.state !== 'invalid') return false;
+    const item = this.items.get(id);
+    if (!item) return false;
+    const kind = layerKindFor(item.type);
+    const proposed = state.proposedBounds;
+    // Build a snapshot of all other items of the same kind.
+    const others: Array<{
+      id: string;
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      layerKind: string;
+    }> = [];
+    for (const [otherId, otherItem] of this.items) {
+      if (otherId === id) continue;
+      others.push({
+        id: otherId,
+        x: otherItem.x,
+        y: otherItem.y,
+        width: otherItem.width,
+        height: otherItem.height,
+        layerKind: layerKindFor(otherItem.type),
+      });
+    }
+    const candidates = GridService.findFreeCells(proposed, others, kind, String(id));
+    if (candidates.length === 0) return false;
+    const target = candidates[0]!;
+    this.updateItem(id, {
+      x: target.x,
+      y: target.y,
+      width: target.width,
+      height: target.height,
+    });
+    this.opts.onItemChange({
+      id,
+      partial: {
+        x: target.x,
+        y: target.y,
+        width: target.width,
+        height: target.height,
+      },
+    });
+    this.lastValidBounds.set(id, {
+      x: target.x,
+      y: target.y,
+      width: target.width,
+      height: target.height,
+    });
+    this.clearPlacementState(id);
+    return true;
   }
 
   /**
