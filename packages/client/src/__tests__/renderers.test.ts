@@ -33,9 +33,11 @@ describe('renderFrame (Task 11.8)', () => {
     const item = mkItem({ type: 'frame' });
     const result = renderFrame(item);
     expect(result).toBeInstanceOf(Container);
-    // Graphics extends Container in PixiJS v8 — confirm the returned value
-    // is also a Graphics instance (no cast trick required).
-    expect(result).toBeInstanceOf(Graphics);
+    // The frame is now a Container of a Graphics + optional Text label
+    // (see packages/client/src/canvas/renderers/frame.ts). The inner
+    // Graphics child is what would be a Graphics instance; the
+    // returned object is a Container composed from those children.
+    expect(result).toBeInstanceOf(Container);
   });
 });
 
