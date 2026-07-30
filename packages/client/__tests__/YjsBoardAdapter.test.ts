@@ -110,7 +110,7 @@ describe('YjsBoardAdapter', () => {
 
   // ----- Task 4.5: Legacy migration -----
 
-  it('migrates a legacy board (single default layer, three items) to four fixed layers (4.5)', () => {
+  it('migrates a legacy board (single default layer, three items) to five fixed layers (4.5)', () => {
     // Pre-seed a Y.Doc with legacy structure.
     const legacyDoc = new Y.Doc();
     const root = legacyDoc.getMap('root');
@@ -150,12 +150,12 @@ describe('YjsBoardAdapter', () => {
     // Construct adapter — migration runs in constructor.
     const migrated = new YjsBoardAdapter(legacyDoc);
 
-    // Verify layers: 4 fixed layers.
+    // Verify layers: 5 fixed layers (frame, media, overlay, connector, annotation).
     const layersArr = root.get('layers') as Y.Array<Y.Map<unknown>>;
     const layers = layersArr.toArray();
-    expect(layers.length).toBe(4);
+    expect(layers.length).toBe(5);
     const layerIds = layers.map((l) => l.get('id'));
-    expect(layerIds).toEqual(['frames', 'media', 'overlay', 'annotations']);
+    expect(layerIds).toEqual(['frames', 'media', 'overlay', 'connectors', 'annotations']);
 
     // Verify all three items now have layerId: 'media'.
     const itemsMap = root.get('items') as Y.Map<Y.Map<unknown>>;
@@ -167,7 +167,7 @@ describe('YjsBoardAdapter', () => {
 
   // ----- Task 4.6: Fresh board bootstrap -----
 
-  it('seeds a fresh board with four fixed layers on first connect (4.6)', () => {
+  it('seeds a fresh board with five fixed layers on first connect (4.6)', () => {
     // Empty Y.Doc — no layers, no items.
     const freshDoc = new Y.Doc();
     const freshAdapter = new YjsBoardAdapter(freshDoc);
@@ -175,17 +175,17 @@ describe('YjsBoardAdapter', () => {
     const root = freshDoc.getMap('root');
     const layersArr = root.get('layers') as Y.Array<Y.Map<unknown>>;
     const layers = layersArr.toArray();
-    expect(layers.length).toBe(4);
+    expect(layers.length).toBe(5);
 
     const layerIds = layers.map((l) => l.get('id'));
-    expect(layerIds).toEqual(['frames', 'media', 'overlay', 'annotations']);
+    expect(layerIds).toEqual(['frames', 'media', 'overlay', 'connectors', 'annotations']);
 
     const orders = layers.map((l) => l.get('order'));
-    expect(orders).toEqual([0, 1, 2, 4]);
+    expect(orders).toEqual([0, 1, 2, 3, 4]);
 
     // Each layer should have kind set.
     const kinds = layers.map((l) => l.get('kind'));
-    expect(kinds).toEqual(['frame', 'media', 'overlay', 'annotation']);
+    expect(kinds).toEqual(['frame', 'media', 'overlay', 'connector', 'annotation']);
   });
 
   // ----- Task 4.7: layerKind for rectangle -----

@@ -38,6 +38,13 @@ export {
   DEFAULT_ANNOTATION_ATTRS,
   isAnnotationItem,
   getAnnotationBounds,
+  ConnectorItemDefinition,
+  ConnectorAttrsSchema,
+  DEFAULT_CONNECTOR_ATTRS,
+  isConnectorItem,
+  getConnectorBounds,
+  connectorHitTest,
+  connectorPinHit,
 } from './items/registry';
 export {
   ImageItemDefinition,
@@ -45,11 +52,13 @@ export {
   isImageItem,
   DEFAULT_IMAGE_SIZE,
 } from './items/image';
+export { resolveAnchor } from './items/connector';
 export type { ItemTypeDefinition } from './items/index';
 export type { ImageAttrs, ImageStatus } from './items/image';
 export type { RectangleAttrs } from './items/rectangle';
 export type { FrameAttrs } from './items/frame';
 export type { AnnotationAttrs } from './items/annotation';
+export type { ConnectorAttrs, ConnectorAnchor, ConnectorRouting, ConnectorStyle } from './board';
 
 // Layer registry (replaces the closed `LayerKind` union with a runtime
 // registry; see openspec/changes/layer-registry)
@@ -75,3 +84,18 @@ export type {
   RegistryChangeListener,
   RegistryUnsubscribe,
 } from './layers/registry';
+
+// Mode registry (replaces the closed `InteractionMode` union with a
+// runtime registry; see openspec/changes/tool-registry-and-modes)
+export {
+  getModeDef,
+  getAllModes,
+  getToolsForMode,
+  isUniversalTool,
+  resolveActiveToolOnModeSwitch,
+} from './modes/registry';
+export type {
+  ModeDefinition,
+  ModeSnapPolicy,
+  ToolShapeForMode,
+} from './modes/registry';

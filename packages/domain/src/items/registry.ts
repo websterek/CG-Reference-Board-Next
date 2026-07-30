@@ -20,6 +20,15 @@ import {
 import { ImageItemDefinition } from './image';
 import { FrameItemDefinition } from './frame';
 import { AnnotationItemDefinition } from './annotation';
+import {
+  ConnectorItemDefinition,
+  isConnectorItem,
+  getConnectorBounds,
+  connectorHitTest,
+  connectorPinHit,
+  ConnectorAttrsSchema,
+  DEFAULT_CONNECTOR_ATTRS,
+} from './connector';
 import type { ItemTypeDefinition } from './index';
 
 export {
@@ -49,6 +58,17 @@ export {
 } from './annotation';
 export type { AnnotationAttrs } from './annotation';
 
+export {
+  ConnectorItemDefinition,
+  ConnectorAttrsSchema,
+  DEFAULT_CONNECTOR_ATTRS,
+  isConnectorItem,
+  getConnectorBounds,
+  connectorHitTest,
+  connectorPinHit,
+} from './connector';
+export type { ConnectorAttrs } from '../board';
+
 export const RectangleItemDefinition: ItemTypeDefinition<RectangleAttrs> = {
   type: 'rectangle' as ItemType,
   layerKind: 'media' as const,
@@ -68,6 +88,7 @@ export const ITEM_TYPES = {
   image: ImageItemDefinition,
   frame: FrameItemDefinition,
   'annotation-stroke': AnnotationItemDefinition,
+  connector: ConnectorItemDefinition,
 } as const satisfies Record<ItemType, ItemTypeDefinition>;
 
 export type KnownAttrs<R extends ItemType> = R extends 'rectangle'
@@ -78,6 +99,8 @@ export type KnownAttrs<R extends ItemType> = R extends 'rectangle'
   ? import('./frame.js').FrameAttrs
   : R extends 'annotation-stroke'
   ? import('./annotation.js').AnnotationAttrs
+  : R extends 'connector'
+  ? import('../board.js').ConnectorAttrs
   : never;
 
 /**

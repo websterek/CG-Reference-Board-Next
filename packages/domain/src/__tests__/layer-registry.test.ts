@@ -38,9 +38,9 @@ afterEach(() => {
 });
 
 describe('layer-registry: default population', () => {
-  it('has exactly 4 default entries', () => {
+  it('has exactly 5 default entries (frame, media, overlay, annotation, connector)', () => {
     const defs = getAllLayers().filter((d) => DEFAULT_KINDS.has(d.kind));
-    expect(defs).toHaveLength(4);
+    expect(defs).toHaveLength(5);
   });
 
   it('frame policy values match the council table', () => {
@@ -107,21 +107,21 @@ describe('layer-registry: default population', () => {
   });
 
   it('non-default kinds return false from isDefaultKind', () => {
-    expect(isDefaultKind('connector')).toBe(false);
+    expect(isDefaultKind('user-stickynote')).toBe(false);
   });
 });
 
 describe('layer-registry: derived lists', () => {
-  it('sortByZOrder returns frame, media, overlay, annotation', () => {
-    expect(sortByZOrder()).toEqual(['frame', 'media', 'overlay', 'annotation']);
+  it('sortByZOrder returns frame, media, overlay, connector, annotation', () => {
+    expect(sortByZOrder()).toEqual(['frame', 'media', 'overlay', 'connector', 'annotation']);
   });
 
-  it('sortByHitPriority returns annotation, overlay, media, frame', () => {
-    expect(sortByHitPriority()).toEqual(['annotation', 'overlay', 'media', 'frame']);
+  it('sortByHitPriority returns annotation, connector, overlay, media, frame', () => {
+    expect(sortByHitPriority()).toEqual(['annotation', 'connector', 'overlay', 'media', 'frame']);
   });
 
-  it('getLayerIds returns the four legacy layer IDs', () => {
-    expect(getLayerIds().sort()).toEqual(['annotations', 'frames', 'media', 'overlay']);
+  it('getLayerIds returns the four legacy layer IDs plus connectors', () => {
+    expect(getLayerIds().sort()).toEqual(['annotations', 'connectors', 'frames', 'media', 'overlay']);
   });
 
   it('initLayerVisibility returns all default kinds visible', () => {
@@ -130,6 +130,7 @@ describe('layer-registry: derived lists', () => {
     expect(map.get('media')).toBe(true);
     expect(map.get('overlay')).toBe(true);
     expect(map.get('annotation')).toBe(true);
+    expect(map.get('connector')).toBe(true);
   });
 });
 
@@ -154,30 +155,26 @@ describe('layer-registry: getLayerDef / tryGetLayerDef', () => {
 
 describe('layer-registry: addLayer', () => {
   it('adds a new entry and derived sorts include it', () => {
+    // Use a unique kind name since `connector` is already registered
+    // at module load by the `connector-items` change.
     const def: LayerDefinition = {
-      kind: 'connector',
-      displayName: 'Connectors',
-      layerId: asLayerId('connectors'),
-      zOrder: 3,
+      kind: 'user-stickynote',
+      displayName: 'Sticky Notes',
+      layerId: asLayerId('stickynotes'),
+      zOrder: 5,
       snapPolicy: 'mandatory',
-      overlapRule: 'none',
+      overlapRule: 'forbid-same-kind',
       containmentPolicy: 'none',
-      hitPriority: 40,
+      hitPriority: 60,
       canBeConnectorEndpoint: false,
       defaultVisible: true,
       defaultLocked: false,
     };
     addLayer(def);
-    expect(getLayerDef('connector')).toEqual(def);
-    expect(sortByZOrder()).toEqual(['frame', 'media', 'overlay', 'connector', 'annotation']);
-    expect(sortByHitPriority()).toEqual([
-      'annotation',
-      'connector',
-      'overlay',
-      'media',
-      'frame',
-    ]);
-    expect(getLayerIds()).toContain('connectors');
+    expect(getLayerDef('user-stickynote')).toEqual(def);
+    expect(sortByZOrder()).toContain('user-stickynote');
+    expect(sortByHitPriority()).toContain('user-stickynote');
+    expect(getLayerIds()).toContain('stickynotes');
   });
 
   it('addLayer throws on duplicate kind', () => {
@@ -478,14 +475,14 @@ describe('layer-registry: behavior (10.1-10.7)', () => {
     expect(getLayerDef('annotation').containmentPolicy).toBe('none');
   });
 
-  it('10.6 — z-order rendering: sortByZOrder() returns frame, media, overlay, annotation', () => {
-    expect(sortByZOrder()).toEqual(['frame', 'media', 'overlay', 'annotation']);
+  it('10.6 — z-order rendering: sortByZOrder() returns frame, media, overlay, connector, annotation', () => {
+    expect(sortByZOrder()).toEqual(['frame', 'media', 'overlay', 'connector', 'annotation']);
   });
 
   it('10.7 — hit-test priority: sortByHitPriority() returns annotation first', () => {
     const order = sortByHitPriority();
     expect(order[0]).toBe('annotation');
-    expect(order).toEqual(['annotation', 'overlay', 'media', 'frame']);
+    expect(order).toEqual(['annotation', 'connector', 'overlay', 'media', 'frame']);
   });
 
   it('10.x — annotation is exempt from non-overlap rule (overlapRule="none")', () => {

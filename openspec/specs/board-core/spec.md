@@ -19,7 +19,7 @@ The system SHALL allow users to create a new board via the web UI.
 
 #### Scenario: Board has default state
 - **WHEN** a new board is created
-- **THEN** it contains four fixed layers: `frames`, `media`, `overlay`, `annotations`
+- **THEN** it contains five first-class layers: `frames`, `media`, `overlay`, `connectors`, `annotations`
 - **THEN** it has no items
 - **THEN** it has a default grid configuration (cell size 20px, snap enabled)
 
@@ -144,6 +144,11 @@ The system SHALL define an extensible item type registry in the domain package. 
 - **WHEN** the registry is queried for the "rectangle" type
 - **THEN** it returns the rectangle item definition with schema, bounds, and hitTest functions
 
+#### Scenario: Registry defines connector type
+- **WHEN** the registry is queried for the "connector" type
+- **THEN** it returns the `ConnectorItemDefinition` with `layerKind: 'connector'`, `schema: ConnectorAttrsSchema`, `defaultAttrs: DEFAULT_CONNECTOR_ATTRS`, `defaultSize: { width: 0, height: 0 }`, and `getBounds`/`hitTest` functions
+- **THEN** the connector is registered alongside rectangle, image, frame, and annotation-stroke
+
 #### Scenario: Adding a new item type requires explicit additions across packages
 - **WHEN** an engineer adds a new item type (e.g., text, image, PDF)
 - **THEN** the engineer adds an `ItemTypeDefinition` entry to `domain/ITEM_TYPES` (schema, defaultAttrs, defaultSize, getBounds, hitTest)
@@ -157,11 +162,11 @@ The system SHALL define an extensible item type registry in the domain package. 
 - **THEN** the contract is "single registration point + per-type implementation," not "no changes required"
 
 ### Requirement: Layer model
-The system SHALL support four fixed semantic layer kinds: `frame`, `media`, `overlay`, `annotation`. Each board SHALL contain exactly one layer of each kind. The item registry SHALL auto-route each item type to its declared `LayerKind`. The user SHALL NOT manually choose a layer for an item. Z-order from back to front SHALL be `frame < media < overlay < annotation`.
+The system SHALL support five first-class semantic layer kinds: `frame`, `media`, `overlay`, `connector`, `annotation`. The four legacy kinds (`frame`, `media`, `overlay`, `annotation`) are pre-populated at module load via the `LayerDefinition` registry; the `connector` kind is registered alongside them. Each board SHALL contain exactly one layer of each registered kind. The item registry SHALL auto-route each item type to its declared `LayerKind`. The user SHALL NOT manually choose a layer for an item. Z-order from back to front SHALL be `frame < media < overlay < connector < annotation`.
 
-#### Scenario: Board has four fixed layers on creation
+#### Scenario: Board has five first-class layers on creation
 - **WHEN** a new board is created
-- **THEN** it contains exactly four layers: `frames`, `media`, `overlay`, `annotations`
+- **THEN** it contains exactly five layers: `frames`, `media`, `overlay`, `connectors`, `annotations`
 - **THEN** the layers have stable IDs and z-order
 
 #### Scenario: Items are auto-routed by type

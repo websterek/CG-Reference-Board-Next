@@ -11,7 +11,7 @@ describe('Item registry — layerKind', () => {
   it('every registered type has a layerKind field', () => {
     for (const [type, def] of Object.entries(ITEM_TYPES)) {
       expect(def.layerKind).toBeDefined();
-      expect(['frame', 'media', 'overlay', 'annotation']).toContain(def.layerKind);
+      expect(['frame', 'media', 'overlay', 'annotation', 'connector']).toContain(def.layerKind);
     }
   });
 

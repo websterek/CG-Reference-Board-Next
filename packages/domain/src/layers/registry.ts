@@ -140,14 +140,21 @@ export interface LayerDefinition {
 // ---------------------------------------------------------------------------
 
 /**
- * The four default kinds. They are non-deletable. Stored as a Set for
+ * The five default kinds. They are non-deletable. Stored as a Set for
  * O(1) membership checks via `isDefaultKind`.
+ *
+ * The `connector` kind was added by the `connector-items` change and
+ * is registered at module load alongside the four legacy kinds. It is
+ * included here so test harnesses that snapshot the default state
+ * (e.g. `layer-registry.test.ts`) preserve it across `afterEach`
+ * cleanup.
  */
 export const DEFAULT_KINDS: ReadonlySet<string> = new Set([
   'frame',
   'media',
   'overlay',
   'annotation',
+  'connector',
 ]);
 
 const registry = new Map<string, LayerDefinition>();
@@ -213,6 +220,27 @@ register({
   overlapRule: 'none',
   containmentPolicy: 'none',
   hitPriority: 50,
+  canBeConnectorEndpoint: false,
+  defaultVisible: true,
+  defaultLocked: false,
+});
+
+// Connector: structural edges between items. Sits between overlay (z=2)
+// and annotation (z=4) so connectors render above content but below
+// freehand markup. Connectors do not snap to the grid (`snapPolicy:
+// 'off'`) because their endpoints follow item bounds, not raw cells,
+// and do not enforce non-overlap (`overlapRule: 'none'`) because
+// lines can cross freely. `canBeConnectorEndpoint: false` keeps
+// connector-on-connector connections out of v1.
+register({
+  kind: 'connector',
+  displayName: 'Connectors',
+  layerId: asLayerId('connectors'),
+  zOrder: 3,
+  snapPolicy: 'off',
+  overlapRule: 'none',
+  containmentPolicy: 'none',
+  hitPriority: 40,
   canBeConnectorEndpoint: false,
   defaultVisible: true,
   defaultLocked: false,

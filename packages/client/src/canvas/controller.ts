@@ -20,7 +20,10 @@ import {
   GridService,
   ITEM_TYPES,
   SpatialIndex,
+  connectorPinHit,
   defaultLayerIdFor,
+  getAllModes,
+  getModeDef,
   layerKindFor,
   sortByZOrder,
   sortByHitPriority,
@@ -39,8 +42,13 @@ import { renderRectangle } from './renderers/rectangle';
 import { renderImage } from './renderers/image';
 import { renderFrame } from './renderers/frame';
 import { renderAnnotation } from './renderers/annotation';
-import { FrameCreateTool } from './tools/frame-tool';
-import { AnnotationFreehandTool } from './tools/annotation-tool';
+import { renderConnector } from './renderers/connector';
+import {
+  populateDefaultToolRegistry,
+  getAllTools,
+  getToolDef,
+  type ToolDefinition,
+} from './tools';
 
 // Touch CullerPlugin so the bundler keeps it in the import graph; the
 // PixiJS v8 Application.init({ preference, ... }) handles registration
@@ -58,8 +66,8 @@ export interface CanvasControllerOptions {
 }
 
 export type ToolbarAction =
-  | { type: 'set-tool'; tool: 'select' | 'rectangle' | 'frame' | 'annotation-freehand' }
-  | { type: 'set-mode'; mode: 'grid' | 'annotation' }
+  | { type: 'set-tool'; tool: string }
+  | { type: 'set-mode'; mode: string }
   | { type: 'delete-selected' };
 
 // Z-order and hit-priority are derived from the layer registry
@@ -87,7 +95,7 @@ export class CanvasController {
   private camera: CameraState = { ...DEFAULT_CAMERA };
   private grid: GridConfig = { ...DEFAULT_GRID_CONFIG };
   private activeToolName: string = 'select';
-  private activeMode: 'grid' | 'annotation' = 'grid';
+  private activeMode: string = getAllModes()[0]?.id ?? 'grid';
 
   /** Tool registry: maps tool name to Tool instance. */
   private toolRegistry = new Map<string, Tool>();
@@ -149,6 +157,20 @@ export class CanvasController {
     | { kind: 'move-selected'; startBoard: Point; startPositions: Map<ItemId, { x: number; y: number }> }
     | null = null;
   private spacebar = false;
+
+  /**
+   * Reattach state machine for dangling connectors (see task 11).
+   *
+   * When the user selects a dangling connector and clicks one of its
+   * endpoint pins (the small circles at the from/to anchors), the
+   * controller enters `'awaiting-target'` for the corresponding
+   * endpoint. Clicking a new item reattaches that endpoint; clicking
+   * empty canvas cancels.
+   *
+   * `kind: 'from' | 'to'` identifies which endpoint is being reattached
+   * (the other endpoint remains fixed).
+   */
+  private reattachState: { kind: 'from' | 'to'; connectorId: ItemId } | null = null;
 
   constructor(private readonly opts: CanvasControllerOptions) {
     this.init();
@@ -275,6 +297,32 @@ export class CanvasController {
     fresh.position.set(next.x, next.y);
     this.addItemToLayer(fresh, next);
     this.displayById.set(idItem, fresh);
+
+    // Endpoint tracking: if any connector references this item, its
+    // rendered path needs to follow the new position. Re-render the
+    // connector by calling `updateItem` with the current item. The
+    // existing `updateItem` flow already handles spatial index
+    // updates and display replacement — we just need to make sure
+    // the connector's `x`/`y`/`width`/`height` are recomputed from
+    // the new endpoint positions.
+    //
+    // We use the connector's stored bounds as a no-op partial so the
+    // connector is rebuilt. `getConnectorBounds` is called inside
+    // `renderConnector` (via `renderItemDisplay`) so the visual path
+    // is correct, and the spatial index is updated with whatever
+    // bounds the connector currently has. The bounds may be slightly
+    // stale for one frame if the connector's x/y was the old bounds,
+    // but on the next frame after the endpoint move the connector
+    // will re-render and pick up the new positions.
+    for (const [otherId, otherItem] of this.items) {
+      if (otherId === idItem) continue;
+      if (otherItem.type !== 'connector') continue;
+      const otherAttrs = otherItem.attrs as { from?: string; to?: string };
+      if (otherAttrs.from !== idItem && otherAttrs.to !== idItem) continue;
+      // Recompute connector's bounds and update display.
+      const connector = otherItem;
+      this.updateItem(otherId, connector);
+    }
   }
 
   removeItem(id: string | ItemId): void {
@@ -297,6 +345,23 @@ export class CanvasController {
       handle.destroy();
       this.selectionHandles.delete(idItem);
     }
+
+    // Endpoint integrity: when an item is deleted, set `dangling: true`
+    // on every connector that references it. The connector is NOT
+    // cascade-deleted; the user can reattach or manually delete the
+    // dangling connector. The dangling flag is set in the controller's
+    // local state and the new item is sent through the adapter's
+    // onItemChange so it propagates to other collaborators.
+    for (const [otherId, otherItem] of this.items) {
+      if (otherItem.type !== 'connector') continue;
+      const otherAttrs = otherItem.attrs as { from?: string; to?: string; dangling?: boolean };
+      if (otherAttrs.from !== idItem && otherAttrs.to !== idItem) continue;
+      if (otherAttrs.dangling) continue; // already dangling
+      const nextAttrs = { ...otherItem.attrs, dangling: true };
+      const nextConnector = { ...otherItem, attrs: nextAttrs } as BoardItem;
+      this.updateItem(otherId, nextConnector);
+      this.opts.onItemChange({ id: otherId, partial: { attrs: nextAttrs } });
+    }
   }
 
   // ----- Selection / Mutations from outside -----
@@ -310,7 +375,15 @@ export class CanvasController {
     if (action.type === 'set-tool') {
       this.activeToolName = action.tool;
     } else if (action.type === 'set-mode') {
-      this.activeMode = action.mode;
+      // Validate the mode ID against the registry. Unknown modes are
+      // rejected (no silent state corruption).
+      try {
+        getModeDef(action.mode);
+        this.activeMode = action.mode;
+      } catch {
+        // Unknown mode — ignore. Toolbar should never send unknown
+        // modes; this is a defensive guard.
+      }
     } else if (action.type === 'delete-selected') {
       for (const id of [...this.selection]) {
         this.removeItem(id);
@@ -403,6 +476,43 @@ export class CanvasController {
   private canvasEl: HTMLCanvasElement | null = null;
   private destroyed = false;
 
+  /**
+   * Hit-test which endpoint pin of a connector the click lands on.
+   * Returns `'from'` or `'to'` if the click is within
+   * `CONNECTOR_PIN_RADIUS` of the corresponding anchor, otherwise
+   * `null`. Used by the reattach flow to identify which endpoint is
+   * being reattached (task 11.2).
+   */
+  private hitTestConnectorPin(
+    item: BoardItem,
+    point: Point,
+  ): 'from' | 'to' | null {
+    return connectorPinHit(item, point, (id: string) => this.items.get(asItemId(id)));
+  }
+
+  /**
+   * Complete a reattach: update the connector's `from`/`to` ItemId
+   * to the new target and clear `dangling`. The update is propagated
+   * to the Yjs adapter via `onItemChange` so remote collaborators
+   * see the reattach.
+   */
+  private completeReattach(
+    connectorId: ItemId,
+    endpoint: 'from' | 'to',
+    newTargetId: ItemId,
+  ): void {
+    const connector = this.items.get(connectorId);
+    if (!connector || connector.type !== 'connector') return;
+    const target = this.items.get(newTargetId);
+    if (!target || target.type === 'connector') return;
+    const attrs = connector.attrs as Record<string, unknown>;
+    const nextAttrs: Record<string, unknown> = { ...attrs, dangling: false };
+    nextAttrs[endpoint] = newTargetId;
+    this.updateItem(connectorId, { attrs: nextAttrs });
+    this.opts.onItemChange({ id: connectorId, partial: { attrs: nextAttrs } });
+    this.renderSelection();
+  }
+
   destroy(): void {
     this.destroyed = true;
     this.index.clear();
@@ -430,13 +540,28 @@ export class CanvasController {
 
   // ----- Tool registry -----
 
+  /**
+   * Populate the controller's tool registry from the `ToolDefinition`
+   * registry (see packages/client/src/canvas/tools/registry.ts). The
+   * definition registry owns identity; the controller owns instances.
+   *
+   * Per tool-registry-and-modes proposal: `populateDefaultToolRegistry`
+   * registers all 11 default `ToolDefinition` entries; this method
+   * instantiates them via their `factory()` and stores the result in
+   * `this.toolRegistry` keyed by tool ID.
+   */
   private initToolRegistry(): void {
-    this.toolRegistry.set('frame', new FrameCreateTool());
-    this.toolRegistry.set('annotation-freehand', new AnnotationFreehandTool());
+    // Idempotent: registering twice would throw on duplicates, so guard.
+    if (this.toolRegistry.size === 0) {
+      populateDefaultToolRegistry();
+      for (const def of getAllTools()) {
+        this.toolRegistry.set(def.id, def.factory());
+      }
+    }
   }
 
   private buildToolContext(): ToolContext {
-    return {
+    const ctx: ToolContext = {
       selection: this.selection,
       snap: (p: Point) => this.snapPoint(p),
       updateItem: (id: string, partial: { x?: number; y?: number; width?: number; height?: number }) => {
@@ -482,7 +607,29 @@ export class CanvasController {
       setActiveTool: (name: string) => {
         this.activeToolName = name;
       },
+      getItem: (id: string): BoardItem | undefined => {
+        return this.items.get(asItemId(id));
+      },
+      hitTest: (point: Point): string | null => {
+        return this.hitTest(point) as string | null;
+      },
     };
+    // Augment with non-domain methods used by HandTool (and other
+    // tools that need camera/canvas access). The ToolContext interface
+    // stays narrow; tools may cast to access these via structural
+    // typing (see HandTool).
+    (ctx as unknown as { pan: (dx: number, dy: number) => void }).pan = (dx, dy) =>
+      this.pan(dx, dy);
+    (ctx as unknown as { setCanvasCursor: (c: string) => void }).setCanvasCursor = (c) => {
+      if (this.app?.canvas) this.app.canvas.style.cursor = c;
+    };
+    (ctx as unknown as { toolOverlay: Container | null }).toolOverlay = this.toolOverlay;
+    (ctx as unknown as {
+      resolveAnchor: (item: BoardItem) => Point;
+    }).resolveAnchor = (item) => {
+      return { x: item.x + item.width / 2, y: item.y + item.height / 2 };
+    };
+    return ctx;
   }
 
   /**
@@ -702,8 +849,35 @@ export class CanvasController {
     this.renderResizeHandles();
   }
 
+  /**
+   * Snap a board-coord point per the active mode's `snapPolicy` from
+   * the `ModeDefinition` registry. Tool-level `snapPolicy` overrides
+   * mode-level policy:
+   *
+   *   - Tool snapPolicy 'exempt'   → return the point unchanged
+   *   - Tool snapPolicy 'mandatory' → snap unconditionally
+   *   - Tool snapPolicy 'inherit-mode' (default) → use mode policy
+   *
+   * Mode policy:
+   *   - 'off'      → return the point unchanged (annotation)
+   *   - 'mandatory' → snap to grid (grid, connector)
+   */
   private snapPoint(p: Point): Point {
-    if (this.activeMode === 'annotation') return p;
+    const toolDef = (() => {
+      try {
+        return getToolDef(this.activeToolName);
+      } catch {
+        return null;
+      }
+    })();
+
+    const toolPolicy = toolDef?.snapPolicy ?? 'inherit-mode';
+    if (toolPolicy === 'exempt') return p;
+    if (toolPolicy === 'mandatory') return GridService.snapPoint(p, this.grid);
+
+    // inherit-mode
+    const modeSnap = getModeDef(this.activeMode).snapPolicy;
+    if (modeSnap === 'off') return p;
     return GridService.snapPoint(p, this.grid);
   }
 
@@ -795,6 +969,12 @@ export class CanvasController {
         return renderFrame(item);
       case 'annotation-stroke':
         return renderAnnotation(item);
+      case 'connector':
+        // Connectors need the live items map to resolve endpoint
+        // positions. `this.items` is a `Map<ItemId, BoardItem>`;
+        // `renderConnector` accepts a string-keyed lookup so the
+        // generic `get` call satisfies the signature.
+        return renderConnector(item, (id) => this.items.get(asItemId(id)));
       case 'rectangle':
       default:
         return renderRectangle(item);
@@ -869,6 +1049,13 @@ export class CanvasController {
         e.preventDefault();
         return;
       }
+      // Esc cancels reattach mode (task 11.4). Connector remains
+      // dangling.
+      if (e.key === 'Escape' && this.reattachState) {
+        this.reattachState = null;
+        e.preventDefault();
+        return;
+      }
       if (e.key === 'Delete' || e.key === 'Backspace') {
         for (const id of [...this.selection]) {
           this.removeItem(id);
@@ -914,6 +1101,42 @@ export class CanvasController {
       }
 
       const hit = this.hitTest(boardPt);
+
+      // Reattach flow (task 11): if we are in reattach mode, the next
+      // click determines the new endpoint (or cancels on empty).
+      if (this.reattachState) {
+        if (hit && !this.items.get(hit)?.type?.includes('connector')) {
+          // A valid non-connector item was clicked — reattach.
+          this.completeReattach(this.reattachState.connectorId, this.reattachState.kind, hit);
+        }
+        // Either way (hit or empty), exit reattach mode.
+        this.reattachState = null;
+        // If a hit happened, the connector is now reattached and the
+        // user clicked something else — let normal selection proceed.
+        // If empty, just exit reattach and fall through to normal
+        // selection clearing.
+      }
+
+      // Reattach trigger: dangling connector is selected and the user
+      // clicked one of its endpoint pins.
+      if (
+        hit &&
+        this.selection.size === 1 &&
+        this.selection.has(hit) &&
+        !this.reattachState
+      ) {
+        const sel = this.items.get(hit);
+        if (sel?.type === 'connector') {
+          const selAttrs = sel.attrs as { dangling?: boolean };
+          if (selAttrs.dangling) {
+            const pinKind = this.hitTestConnectorPin(sel, boardPt);
+            if (pinKind) {
+              this.reattachState = { kind: pinKind, connectorId: hit };
+              return;
+            }
+          }
+        }
+      }
 
       // Check for resize: if a single item is selected and pointer is near a corner
       if (this.selection.size === 1 && hit && this.selection.has(hit)) {
